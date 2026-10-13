@@ -76,7 +76,7 @@ def main() -> None:
     for n in notes:
         print("  -", n)
     for tool, why in (("python3", ""), ("git", ""), ("gh", " (chỉ cần nếu GH_SYNC=1)"),
-                      ("claude", " (chỉ cần trên máy chạy `kit.py run`; máy chỉ có Copilot vẫn dùng được approve/status/report/doctor)")):
+                      ("claude", " (không bắt buộc: không có thì dùng agent CLI khác qua AGENT_CMD, hoặc chế độ chat như Copilot Chat)")):
         if not shutil.which(tool):
             print(f"  ! thiếu `{tool}` trên máy này{why}")
     v = subprocess.run(["claude", "--version"], capture_output=True, text=True) if shutil.which("claude") else None

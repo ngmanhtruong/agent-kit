@@ -1,26 +1,32 @@
 #!/usr/bin/env python3
-"""agent-kit runner: design → tasks → agents → graded PRs.
+"""agent-kit runner: design → tasks → agents → graded PRs. Chạy với mọi agent.
+
+Agent (đặt AGENT trong runner/config.env, mặc định auto):
+  claude  Claude Code CLI — có rào cứng (hooks), chạy tự động trọn task
+  cli     agent CLI khác qua AGENT_CMD (Copilot CLI, Codex, Gemini...) — chạy tự động
+  chat    không có CLI (Copilot Chat trong VS Code...) — agent trong chat tự chạy
+          `kit.py work`, làm bước nó in ra, rồi chạy lại cho tới khi xong
+  auto    claude nếu có → cli nếu có AGENT_CMD → chat
 
 Kiểm tra (chỉ đọc — an toàn chạy trên bất kỳ máy nào, bất kỳ lúc nào):
   python3 runner/kit.py status [--offline]       bảng trạng thái mọi task, gộp từ mọi máy
-  python3 runner/kit.py report [--last N]        tóm tắt các lượt chạy gần nhất (mọi máy)
+  python3 runner/kit.py report [--last N]        tóm tắt các phiên gần nhất (mọi máy)
   python3 runner/kit.py report --task <id>       chi tiết một task: lý do, log, báo cáo, nhánh
-  python3 runner/kit.py doctor                   kiểm tra toàn bộ: cài đặt, tasks, trạng thái, đồng bộ
+  python3 runner/kit.py doctor                   kiểm tra toàn bộ: cài đặt, agent, tasks, đồng bộ
 
 Làm việc:
   python3 runner/kit.py plan design/<feature>    planner chia design thành tasks nháp
-  python3 runner/kit.py approve <id|epic|all>    duyệt nháp → GitHub Issue (không cần Claude)
-  python3 runner/kit.py run [--max N]            một phiên làm việc: chạy các task sẵn sàng
-                                                 (lúc nào, máy nào có Claude Code cũng được; `night` là tên cũ)
+  python3 runner/kit.py approve <id|epic|all>    duyệt nháp → GitHub Issue (không gọi AI)
+  python3 runner/kit.py work [--max N] [--task ID]   phiên làm việc: làm các task sẵn sàng
+  python3 runner/kit.py work --abort             (chế độ chat) huỷ task đang làm, không tính lượt
   python3 runner/kit.py sync                     PR merged → done; cập nhật và chia sẻ trạng thái
   python3 runner/kit.py import                   GitHub Issue nhãn 'agent-ready' → task nháp
   python3 runner/kit.py set <id> <status>        đổi trạng thái tay (vd: failed → queued)
   python3 runner/kit.py doctor --fix             sửa các lỗi an toàn (task kẹt 'running', sync)
 
 Dữ liệu dùng chung giữa các máy nằm trên nhánh git riêng `agent-kit/log`
-(không bao giờ đụng nhánh code): mỗi máy chỉ ghi file của chính nó
-(state/<máy>.json, runs/<máy>/...), nên không bao giờ xung đột. Đọc thì gộp
-theo bản ghi mới nhất. Spec (tasks/*.md) chỉ người sửa.
+(không bao giờ đụng nhánh code): mỗi máy chỉ ghi file của chính nó, nên không
+xung đột; đọc thì gộp theo bản ghi mới nhất. Spec (tasks/*.md) chỉ người sửa.
 Chỉ dùng thư viện chuẩn của Python 3.8+.
 """
 import argparse
@@ -29,6 +35,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import socket
 import subprocess
@@ -380,8 +387,17 @@ def release_lock() -> None:
     LOG.commit("unlock", mutate)
 
 
-# ───────────────────────── claude ─────────────────────────
-class NoClaude(Exception):
+# ───────────────────────── agent drivers ─────────────────────────
+# kit.py works with any agent:
+#   claude — Claude Code CLI (hooks = hard guardrails, subagents by name)
+#   cli    — any other agent CLI via AGENT_CMD (e.g. Copilot CLI, Codex, Gemini)
+#   chat   — no CLI at all (e.g. Copilot Chat in VS Code): `kit.py work` runs one
+#            step at a time and prints what the chat agent must do next.
+class NeedsChat(Exception):
+    pass
+
+
+class LimitHit(Exception):
     pass
 
 
@@ -390,41 +406,70 @@ def claude_available() -> bool:
     return bool(shutil.which(b)) or Path(b).expanduser().is_file()
 
 
-NO_CLAUDE_MSG = ("Máy này không có Claude Code CLI (`{bin}`). Lệnh này cần gọi agent nên phải chạy "
-                 "trên máy có cài `claude` (ví dụ mini PC). Các lệnh approve, status, report, "
-                 "doctor, sync, set, import vẫn dùng được ở đây.")
+def agent_mode() -> str:
+    m = (CFG.get("AGENT") or "auto").strip().lower()
+    if m == "auto":
+        return "claude" if claude_available() else ("cli" if CFG.get("AGENT_CMD") else "chat")
+    return m if m in ("claude", "cli", "chat") else "chat"
 
 
-def claude(prompt: str, role: str, cwd: Path, agent: str = "", timeout_min: int = 60,
-           extra_env: dict = None) -> dict:
-    if not claude_available():
-        raise NoClaude(NO_CLAUDE_MSG.format(bin=CFG["CLAUDE_BIN"]))
+def role_guide(role: str) -> str:
+    """The role's instructions from .claude/agents/<role>.md, without frontmatter."""
+    p = ROOT / ".claude" / "agents" / f"{role}.md"
+    text = p.read_text() if p.exists() else ""
+    return re.sub(r"^---\n.*?\n---\n", "", text, flags=re.S).strip()
+
+
+def _claude(prompt: str, role: str, cwd: Path, agent: str, timeout_min: int) -> dict:
     cmd = [CFG["CLAUDE_BIN"], "-p", prompt, "--output-format", "json",
            "--permission-mode", "acceptEdits", "--permission-prompts", "none"]
     if agent:
         cmd += ["--agent", agent]
     if CFG.get("MAX_BUDGET_USD"):
         cmd += ["--max-budget-usd", CFG["MAX_BUDGET_USD"]]
+    return _exec(cmd, cwd, role, timeout_min, parse_json=True)
+
+
+def _cli(prompt: str, role: str, cwd: Path, agent: str, timeout_min: int) -> dict:
+    tmpl = CFG.get("AGENT_CMD", "").strip()
+    if not tmpl:
+        raise SystemExit("AGENT=cli nhưng AGENT_CMD trống trong runner/config.env")
+    full = (role_guide(agent) + "\n\n---\n\n" + prompt) if agent else prompt
+    parts = shlex.split(tmpl)
+    if any("{prompt}" in x for x in parts):
+        return _exec([x.replace("{prompt}", full) for x in parts], cwd, role, timeout_min)
+    return _exec(parts, cwd, role, timeout_min, stdin=full)
+
+
+def _exec(cmd, cwd, role, timeout_min, parse_json=False, stdin=None) -> dict:
     env = dict(os.environ, AGENT_KIT_ROLE=role, AGENT_KIT_BASE=CFG["BASE_BRANCH"],
                AGENT_KIT_HOLDOUT_DIR=CFG.get("HOLDOUT_DIR", ""))
-    env.update(extra_env or {})
     try:
-        r = run(cmd, cwd=cwd, timeout=timeout_min * 60, env=env)
-        raw = r.stdout + "\n" + r.stderr
+        r = subprocess.run(cmd, cwd=str(cwd), capture_output=True, text=True, env=env,
+                           input=stdin, timeout=timeout_min * 60)
     except subprocess.TimeoutExpired:
-        return {"ok": False, "timeout": True, "limit": False, "result": "timeout", "cost": 0}
-    try:
-        j = json.loads(r.stdout)
-    except Exception:
-        j = {}
-    text = str(j.get("result", raw))
-    limited = bool(LIMIT_RE.search(raw)) and (r.returncode != 0 or j.get("is_error"))
-    return {"ok": r.returncode == 0 and not j.get("is_error"), "limit": limited,
-            "timeout": False, "result": text, "cost": j.get("total_cost_usd", 0) or 0}
+        return {"ok": False, "limit": False, "result": "timeout", "cost": 0}
+    except FileNotFoundError:
+        raise SystemExit(f"Không chạy được agent: không tìm thấy `{cmd[0]}`")
+    raw = r.stdout + "\n" + r.stderr
+    j = {}
+    if parse_json:
+        try:
+            j = json.loads(r.stdout)
+        except Exception:
+            j = {}
+    failed = r.returncode != 0 or bool(j.get("is_error"))
+    return {"ok": not failed, "limit": failed and bool(LIMIT_RE.search(raw)),
+            "result": str(j.get("result", r.stdout.strip() or raw)), "cost": j.get("total_cost_usd", 0) or 0}
 
 
-class LimitHit(Exception):
-    pass
+def call_agent(prompt: str, role: str, cwd: Path, agent: str = "", timeout_min: int = 60) -> dict:
+    mode = agent_mode()
+    if mode == "claude":
+        return _claude(prompt, role, cwd, agent, timeout_min)
+    if mode == "cli":
+        return _cli(prompt, role, cwd, agent, timeout_min)
+    raise NeedsChat()
 
 
 # ───────────────────────── read-only commands ─────────────────────────
@@ -438,7 +483,7 @@ def stale_running(rec: dict, lock: dict) -> bool:
     if rec.get("status") != "running":
         return False
     held = lock.get("host") == rec.get("host") and age_hours(lock.get("started", "")) < float(CFG["LOCK_HOURS"])
-    if rec.get("host") == HOST and (STATE_DIR / "run.lock").exists():
+    if rec.get("host") == HOST and ((STATE_DIR / "work.lock").exists() or SESSION.exists()):
         held = True  # this machine is running it right now
     return not held and age_hours(rec.get("updated", "")) > 1
 
@@ -468,6 +513,10 @@ def cmd_status(args):
         print(f"Máy {h}: phiên cuối {last} · cập nhật {local_time(m.get('last_seen', ''))}")
     if lock:
         print(f"🔒 Đang chạy: {lock.get('host')} từ {local_time(lock.get('started', ''))}")
+    sess = load_session()
+    if sess:
+        print(f"▶ Phiên chat đang mở trên máy này: task {sess.get('task')}, bước '{sess.get('stage')}'. "
+              f"Tiếp tục: python3 runner/kit.py work · Huỷ: python3 runner/kit.py work --abort")
     if not fetched and not getattr(args, "offline", False):
         print("(!) Không đọc được nhánh log từ origin — chỉ hiển thị dữ liệu trên máy này.")
     if counts.get("running?"):
@@ -592,12 +641,16 @@ def cmd_doctor(args):
         say("✓", "runner/config.env có")
     else:
         say("✗", "thiếu runner/config.env → cp runner/config.env.example runner/config.env")
-    ok, v = claude_version_ok()
-    if ok is None and not claude_available():
-        say("!", "máy này không có Claude Code CLI → không chạy được `plan` (tự động) và `run`; "
-                 "approve/status/report/doctor/sync/set/import vẫn dùng được")
+    mode = agent_mode()
+    if mode == "claude":
+        ok, v = claude_version_ok()
+        say("✓" if ok else ("✗" if ok is None else "!"), f"agent: Claude Code {v}" + ("" if ok else " (cần ≥ 2.1.295)"))
+    elif mode == "cli":
+        exe = (shlex.split(CFG.get("AGENT_CMD", "")) or [""])[0]
+        say("✓" if exe and shutil.which(exe) else "✗", f"agent: CLI `{exe or '(AGENT_CMD trống)'}`"
+            + ("" if exe and shutil.which(exe) else " không tìm thấy") + " — không có rào cứng (hooks), kit.py vẫn chấm và chặn sửa vùng bảo vệ")
     else:
-        say("✓" if ok else ("✗" if ok is None else "!"), f"claude {v}" + ("" if ok else " (cần ≥ 2.1.295)"))
+        say("✓", "agent: chế độ chat (Copilot Chat, ...) — chạy `python3 runner/kit.py work` trong chat, làm theo từng bước nó in ra")
     if flag("GH_SYNC"):
         r = run(["gh", "auth", "status"], check=False) if shutil.which("gh") else None
         say("✓" if r and r.returncode == 0 else "✗", "gh đã đăng nhập" if r and r.returncode == 0 else "gh chưa cài/chưa đăng nhập (GH_SYNC=1)")
@@ -619,7 +672,7 @@ def cmd_doctor(args):
     if fetched:
         say("✓", f"đọc được nhánh {LOG_BRANCH}")
     elif has_origin():
-        say("!", f"chưa có nhánh {LOG_BRANCH} trên origin (sẽ được tạo ở phiên `run` đầu tiên)")
+        say("!", f"chưa có nhánh {LOG_BRANCH} trên origin (sẽ được tạo ở phiên `work` đầu tiên)")
     base = CFG["BASE_BRANCH"]
     if has_origin() and git(["fetch", "-q", "origin", base], check=False).returncode == 0:
         behind = git(["rev-list", "--count", f"HEAD..origin/{base}"], check=False).stdout.strip()
@@ -627,12 +680,12 @@ def cmd_doctor(args):
         if behind not in ("", "0"):
             say("!", f"máy này chậm {behind} commit so với origin/{base} → git pull")
         elif ahead not in ("", "0"):
-            say("!", f"máy này có {ahead} commit chưa push → git push (máy khác chạy `run` sẽ không thấy)")
+            say("!", f"máy này có {ahead} commit chưa push → git push (máy khác chạy `work` sẽ không thấy)")
         else:
             say("✓", f"khớp với origin/{base}")
     dirty = git(["status", "--porcelain", "--", "tasks"], check=False).stdout.strip()
     if dirty:
-        say("!", "tasks/ có thay đổi chưa commit → máy khác chạy `run` sẽ không thấy")
+        say("!", "tasks/ có thay đổi chưa commit → máy khác chạy `work` sẽ không thấy")
     hosts = remote_hosts()
     for h, d in sorted(hosts.items()):
         last = d.get("meta", {}).get("last_run", "")
@@ -723,9 +776,9 @@ def cmd_plan(args):
               f"Các file design:\n{files}\n\n"
               f"Ghi vào `tasks/{feature}/`. Theo đúng hướng dẫn của bạn và `tasks/_TEMPLATE.md`. "
               f"Trường `design:` của mỗi task = `{d.relative_to(ROOT)}`.")
-    if not claude_available():
-        print("Máy này không có Claude Code CLI. Dán đoạn dưới vào Copilot Chat (chế độ Agent) "
-              "hoặc trợ lý AI khác đang mở repo này:\n")
+    if agent_mode() == "chat":
+        print("Chế độ chat: làm bước này trong Copilot Chat (chế độ Agent) hoặc trợ lý AI đang mở repo này.\n"
+              "Prompt cho agent:\n")
         print("─" * 60)
         print("Đọc và làm đúng theo `.claude/agents/planner.md` (bạn đóng vai planner).\n" + prompt +
               "\nChỉ được tạo/sửa file trong `tasks/`. Mọi task để `status: draft`.")
@@ -733,7 +786,7 @@ def cmd_plan(args):
         print(f"\nXong thì xem lại tasks/{feature}/ rồi chạy: python3 runner/kit.py approve {feature.upper()}")
         return
     print(f"Planner đang đọc {d.relative_to(ROOT)} ...")
-    r = claude(prompt, role="planner", cwd=ROOT, agent="planner", timeout_min=30)
+    r = call_agent(prompt, role="planner", cwd=ROOT, agent="planner", timeout_min=30)
     print(r["result"])
     print("\nXem lại tasks/%s/ rồi chạy: python3 runner/kit.py approve %s" % (feature, feature.upper()))
 
@@ -779,21 +832,21 @@ def cmd_approve(args):
         print(f"✓ {t['id']} approved" + (f" (#{t['issue']})" if t.get("issue") else ""))
     publish(st, msg="approve")
     if any(t.get("holdout") is True for t in picked):
-        print("\nTask có holdout: true → bài test ẩn sẽ được viết trong phiên `run`, trên máy chạy task, ngay trước khi làm task đó.")
-    print("\nNhớ commit + push thư mục tasks/ để máy khác chạy `run` thấy được.")
+        print("\nTask có holdout: true → bài test ẩn sẽ được viết trong `kit.py work`, ngay trước khi làm task đó.")
+    print("\nNhớ commit + push thư mục tasks/ để máy khác chạy `work` thấy được.")
 
 
-def write_holdout(t: dict):
+def holdout_prompt(t: dict) -> str:
     tid = str(t["id"])
+    return (f"Viết bài kiểm tra ẩn cho task `{t['_path'].relative_to(ROOT)}` "
+            f"(design: `{t.get('design', '')}`). Ghi vào `.agent-kit/holdout-staging/{tid}/` "
+            f"với đường dẫn tương đối giống nơi test thật nằm trong repo. Không sửa file nào khác.")
+
+
+def collect_holdout(tid: str) -> bool:
+    """Move tests from staging (inside the repo) to HOLDOUT_DIR (outside it)."""
     staging = STATE_DIR / "holdout-staging" / tid
-    shutil.rmtree(staging, ignore_errors=True)
-    prompt = (f"Viết bài kiểm tra ẩn cho task `{t['_path'].relative_to(ROOT)}` "
-              f"(design: `{t.get('design', '')}`). Ghi vào `.agent-kit/holdout-staging/{tid}/`.")
-    r = claude(prompt, role="test-writer", cwd=ROOT, agent="test-writer", timeout_min=20)
-    if r["limit"]:
-        raise LimitHit(r["result"][-300:])
     if not staging.exists() or not any(p.is_file() for p in staging.rglob("*")):
-        print(f"  ! test-writer không tạo file cho {tid}: {r['result'][:200]}")
         return False
     dest = Path(CFG["HOLDOUT_DIR"]) / tid
     shutil.rmtree(dest, ignore_errors=True)
@@ -803,13 +856,25 @@ def write_holdout(t: dict):
     return True
 
 
+def write_holdout(t: dict) -> bool:
+    tid = str(t["id"])
+    shutil.rmtree(STATE_DIR / "holdout-staging" / tid, ignore_errors=True)
+    r = call_agent(holdout_prompt(t), role="test-writer", cwd=ROOT, agent="test-writer", timeout_min=20)
+    if r["limit"]:
+        raise LimitHit(r["result"][-300:])
+    if not collect_holdout(tid):
+        print(f"  ! test-writer không tạo file cho {tid}: {r['result'][:200]}")
+        return False
+    return True
+
+
 def needs_holdout(t: dict) -> bool:
     return t.get("holdout") is True and bool(CFG.get("HOLDOUT_DIR")) and \
         not (Path(CFG["HOLDOUT_DIR"]) / str(t["id"])).exists()
 
 
 class SkipTask(Exception):
-    """Task can't run in this session for a reason that is not the agent's fault (no attempt used)."""
+    """Task can't be worked on now for a reason that is not the agent's fault (no attempt used)."""
 
 
 def gh_snapshot() -> dict:
@@ -894,7 +959,18 @@ def cmd_import(_args):
         print(f"+ {p.relative_to(ROOT)}  (cần có mục '# Acceptance' rồi mới approve được)")
 
 
-# ───────────────────────── run (one work session) ─────────────────────────
+# ───────────────────────── work ─────────────────────────
+# Paths an implementer must never change. Checked here on the final diff, so the
+# rule holds for every agent — not only for Claude Code, whose hooks also block it.
+PROTECTED = ["eval/", ".claude/", "tasks/", "runner/", "design/", "docs/", "CLAUDE.md",
+             ".github/copilot-instructions.md", ".env"]
+
+
+def is_protected(path: str) -> bool:
+    return any(path == p.rstrip("/") or path.startswith(p if p.endswith("/") else p + ".") or
+               (p.endswith("/") and path.startswith(p)) or path == p for p in PROTECTED)
+
+
 def ready_tasks(tasks, st):
     out = []
     for t in tasks.values():
@@ -908,125 +984,107 @@ def ready_tasks(tasks, st):
     return sorted(out, key=lambda t: (t["priority"], str(t["id"])))
 
 
-def run_holdout(t, wt: Path, log: Path):
+def run_holdout(t, wd: Path, log: Path):
     src = Path(CFG["HOLDOUT_DIR"]) / str(t["id"]) if CFG.get("HOLDOUT_DIR") else None
     if not src or not src.exists() or not CFG.get("HOLDOUT_CMD"):
         return None
     copied = []
     for f in src.rglob("*"):
         if f.is_file():
-            dst = wt / f.relative_to(src)
+            dst = wd / f.relative_to(src)
             dst.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(f, dst)
             copied.append(dst)
     try:
-        r = run(CFG["HOLDOUT_CMD"], cwd=wt, timeout=900, shell=True)
+        r = run(CFG["HOLDOUT_CMD"], cwd=wd, timeout=900, shell=True)
         log.write_text(r.stdout + "\n" + r.stderr)
         return r.returncode == 0
     finally:
         for f in copied:
             f.unlink(missing_ok=True)
-        git(["checkout", "--", "."], cwd=wt, check=False)  # restore anything overwritten
+        git(["checkout", "--", "."], cwd=wd, check=False)  # restore anything overwritten
 
 
-def run_task(t, st, run_dir: Path) -> dict:
+def implementer_prompt(t: dict, branch: str, prev: str) -> str:
+    tid = str(t["id"])
+    return (f"Bạn đang làm task `{tid}` trên nhánh `{branch}`. Đọc `CLAUDE.md` trước.\n\n"
+            f"=== TASK ===\n{t['_path'].read_text()}\n=== HẾT TASK ===\n\n"
+            + (f"Lần thử trước bị chấm FAIL vì:\n{prev}\nĐừng lặp lại.\n\n" if prev else "")
+            + f"Khi xong, làm theo skill `finish-task` (`.claude/skills/finish-task/SKILL.md`). "
+              f"Báo cáo ghi vào `.agent-kit/reports/{tid}.md`.")
+
+
+def reviewer_prompt(t: dict, g: dict) -> str:
     tid, base = str(t["id"]), CFG["BASE_BRANCH"]
-    # Hidden tests are written here, on the machine that runs them, from the spec and
-    # the current base code — before the implementer starts, so they can't be tuned to it.
-    if needs_holdout(t):
-        print(f"  viết bài test ẩn cho {tid} ...")
-        if not write_holdout(t):
-            raise SkipTask("test-writer không viết được bài test ẩn")
-    rec = st.setdefault(tid, {})
-    attempt = rec.get("attempts", 0) + 1
-    base_sha = git(["rev-parse", "--short", base]).stdout.strip()
-    set_status(t, st, "running", attempts=attempt, spec_sha=t["_sha"], base_sha=base_sha,
-               run=run_dir.name)
-    publish(st, msg=f"start {tid}")
-    branch = f"agent/{tid}-a{attempt}"
-    wt = Path(CFG["WORKTREE_ROOT"]) / tid
-    if wt.exists():
-        git(["worktree", "remove", "--force", str(wt)], check=False)
-    git(["branch", "-D", branch], check=False)
-    wt.parent.mkdir(parents=True, exist_ok=True)
-    git(["worktree", "add", "-b", branch, str(wt), base])
-    out = run_dir / tid
+    hold = g["hold_ok"]
+    return (f"Chấm task `{tid}`. Spec: `{t['_path'].relative_to(ROOT)}` (nội dung bên dưới). "
+            f"So sánh với nhánh gốc bằng `git diff {base}...HEAD`. "
+            f"Kết quả checks: `.agent-kit/checks.log` ({'PASS' if g['checks_ok'] else 'FAIL'}). "
+            f"Bộ test bổ sung: {'không có' if hold is None else ('PASS' if hold else 'FAIL')}. "
+            f"Báo cáo của worker: `.agent-kit/reports/{tid}.md` (đừng tin, tự kiểm tra).\n\n"
+            f"=== TASK ===\n{t['_path'].read_text()}")
+
+
+def parse_review(text: str) -> dict:
+    m = re.search(r"\{.*\}", text or "", re.S)
+    try:
+        rv = json.loads(m.group(0)) if m else None
+    except Exception:
+        rv = None
+    if not isinstance(rv, dict) or rv.get("verdict") not in ("PASS", "FAIL"):
+        return {"verdict": "FAIL", "reasons": ["reviewer không trả về JSON hợp lệ: " + (text or "")[:300]]}
+    return rv
+
+
+def grade(t: dict, wd: Path) -> dict:
+    """Mechanical grading, identical for every agent: diff, protected paths, checks, hidden tests."""
+    tid, base = str(t["id"]), CFG["BASE_BRANCH"]
+    (wd / ".agent-kit").mkdir(exist_ok=True)
+    if git(["status", "--porcelain"], cwd=wd).stdout.strip():
+        git(["add", "-A"], cwd=wd, check=False)
+        git(["commit", "-qm", f"{tid}: uncommitted changes from agent", "--no-verify"], cwd=wd, check=False)
+    changed = git(["diff", "--name-only", f"{base}...HEAD"], cwd=wd, check=False).stdout.split()
+    touched = [p for p in changed if is_protected(p)]
+    chk = run(["bash", "eval/checks.sh"], cwd=wd, timeout=900)
+    (wd / ".agent-kit" / "checks.log").write_text(chk.stdout + "\n" + chk.stderr)
+    hold_ok = run_holdout(t, wd, wd / ".agent-kit" / "holdout.log")
+    g = {"has_diff": bool(changed), "protected": touched, "checks_ok": chk.returncode == 0,
+         "hold_ok": hold_ok, "checks_tail": (chk.stdout + chk.stderr)[-2500:]}
+    g["ok"] = g["has_diff"] and not touched and g["checks_ok"] and hold_ok is not False
+    g["reasons"] = (([] if g["has_diff"] else ["không có thay đổi nào"]) +
+                    ([f"sửa vùng bảo vệ: {', '.join(touched)}"] if touched else []) +
+                    ([] if g["checks_ok"] else ["eval/checks.sh FAIL"]) +
+                    ([] if hold_ok is not False else ["bài test ẩn FAIL"]))
+    return g
+
+
+def finalize(t: dict, st: dict, wd: Path, branch: str, attempt: int, base_sha: str,
+             g: dict, review: dict, out: Path, cost=0) -> dict:
+    """Record the verdict, push the branch, open a PR on PASS — same for every agent."""
+    tid, base = str(t["id"]), CFG["BASE_BRANCH"]
     out.mkdir(parents=True, exist_ok=True)
-    (wt / ".agent-kit").mkdir(exist_ok=True)
-
-    prev = rec.get("last_fail")
-    prompt = (f"Bạn đang làm task `{tid}` trên nhánh `{branch}`. Đọc `CLAUDE.md` trước.\n\n"
-              f"=== TASK ===\n{t['_path'].read_text()}\n=== HẾT TASK ===\n\n"
-              + (f"Lần thử trước bị chấm FAIL vì:\n{prev}\nĐừng lặp lại.\n\n" if prev else "")
-              + f"Khi xong, làm theo skill `finish-task`. Báo cáo ghi vào `.agent-kit/reports/{tid}.md`.")
-    w = claude(prompt, role="worker", cwd=wt, agent="implementer",
-               timeout_min=int(CFG["TASK_TIMEOUT_MIN"]))
-    (out / "worker.txt").write_text(w["result"])
-    if w["limit"]:
-        set_status(t, st, "queued", attempts=attempt - 1)
-        git(["worktree", "remove", "--force", str(wt)], check=False)
-        raise LimitHit(w["result"][-300:])
-
-    if git(["status", "--porcelain"], cwd=wt).stdout.strip():
-        git(["add", "-A"], cwd=wt, check=False)
-        git(["commit", "-m", f"{tid}: uncommitted changes from agent", "--no-verify"], cwd=wt, check=False)
-
-    has_diff = git(["rev-list", "--count", f"{base}..HEAD"], cwd=wt).stdout.strip() not in ("", "0")
-    chk = run(["bash", "eval/checks.sh"], cwd=wt, timeout=900)
-    (wt / ".agent-kit" / "checks.log").write_text(chk.stdout + "\n" + chk.stderr)
-    checks_ok = chk.returncode == 0
-    hold_ok = run_holdout(t, wt, wt / ".agent-kit" / "holdout.log")
-
-    review = {"verdict": "SKIPPED", "reasons": [], "risks": [], "human_should_check": []}
-    if flag("REVIEW") and has_diff:
-        rp = (f"Chấm task `{tid}`. Spec: `{t['_path'].relative_to(ROOT)}` (nội dung bên dưới). "
-              f"So sánh với nhánh gốc bằng `git diff {base}...HEAD`. "
-              f"Kết quả checks: `.agent-kit/checks.log` ({'PASS' if checks_ok else 'FAIL'}). "
-              f"Bộ test bổ sung: {'không có' if hold_ok is None else ('PASS' if hold_ok else 'FAIL')}"
-              + (", log `.agent-kit/holdout.log`" if hold_ok is not None else "")
-              + f". Báo cáo của worker: `.agent-kit/reports/{tid}.md` (đừng tin, tự kiểm tra).\n\n"
-              f"=== TASK ===\n{t['_path'].read_text()}")
-        rv = claude(rp, role="reviewer", cwd=wt, agent="reviewer", timeout_min=20)
-        if rv["limit"]:
-            set_status(t, st, "queued", attempts=attempt - 1)
-            git(["worktree", "remove", "--force", str(wt)], check=False)
-            raise LimitHit(rv["result"][-300:])
-        m = re.search(r"\{.*\}", rv["result"], re.S)
-        try:
-            review = json.loads(m.group(0)) if m else review
-        except Exception:
-            review["reasons"] = [rv["result"][:500]]
-            review["verdict"] = "FAIL"
-
     for f in ["checks.log", "holdout.log", f"reports/{tid}.md"]:
-        p = wt / ".agent-kit" / f
+        p = wd / ".agent-kit" / f
         if p.exists():
             shutil.copy2(p, out / Path(f).name)
     (out / "review.json").write_text(json.dumps(review, indent=2, ensure_ascii=False))
-
-    passed = has_diff and checks_ok and hold_ok is not False and review.get("verdict") in ("PASS", "SKIPPED")
-    reasons = [] if passed else (
-        ([] if has_diff else ["không có thay đổi nào"]) +
-        ([] if checks_ok else ["eval/checks.sh FAIL"]) +
-        ([] if hold_ok is not False else ["bài test ẩn FAIL"]) +
-        list(review.get("reasons", [])))
-
-    # Every attempt's branch goes to origin so any machine can inspect it.
+    passed = g["ok"] and review.get("verdict") in ("PASS", "SKIPPED")
+    reasons = [] if passed else g["reasons"] + list(review.get("reasons", []))
     pushed = has_origin() and flag("PUBLISH") and \
-        git(["push", "-q", "-u", "origin", branch, "--force"], cwd=wt, check=False).returncode == 0
+        git(["push", "-q", "-u", "origin", branch, "--force"], cwd=wd, check=False).returncode == 0
     result = {"id": tid, "passed": passed, "reasons": reasons, "branch": branch, "pushed": pushed,
               "base_sha": base_sha, "spec_sha": t["_sha"], "attempt": attempt, "host": HOST,
-              "cost": w["cost"], "risks": review.get("risks", []), "pr": "", "finished": now()}
-
+              "agent": agent_mode(), "cost": cost, "risks": review.get("risks", []), "pr": "",
+              "finished": now()}
     if passed:
         pr = ""
         if flag("GH_SYNC") and pushed:
             report = (out / f"{tid}.md").read_text() if (out / f"{tid}.md").exists() else ""
             body = (f"{report}\n\n---\n**Chấm tự động**: checks PASS · test ẩn "
-                    f"{'PASS' if hold_ok else 'không có'} · reviewer {review.get('verdict')}\n"
+                    f"{'PASS' if g['hold_ok'] else 'không có'} · reviewer {review.get('verdict')}\n"
                     f"**Rủi ro**: {'; '.join(review.get('risks', [])) or '-'}\n"
                     f"**Nên xem kỹ**: {'; '.join(review.get('human_should_check', [])) or '-'}\n"
-                    f"**Chạy trên**: {HOST} · base `{base_sha}` · spec `{t['_sha']}`\n\n"
+                    f"**Chạy trên**: {HOST} · agent {agent_mode()} · base `{base_sha}` · spec `{t['_sha']}`\n\n"
                     + (f"Closes #{t['issue']}" if t.get("issue") else ""))
             r = gh(["pr", "create", "--base", base, "--head", branch,
                     "--title", f"[{tid}] agent", "--body", body], check=False)
@@ -1044,8 +1102,53 @@ def run_task(t, st, run_dir: Path) -> dict:
                 f"Chi tiết: `python3 runner/kit.py report --task {tid}`"], check=False)
             gh(["issue", "edit", str(t["issue"]), "--add-label", "needs-human"], check=False)
     (out / "result.json").write_text(json.dumps(result, indent=2, ensure_ascii=False))
-    git(["worktree", "remove", "--force", str(wt)], check=False)
     return result
+
+
+def begin_attempt(t: dict, st: dict, run_name: str):
+    tid, base = str(t["id"]), CFG["BASE_BRANCH"]
+    attempt = st.get(tid, {}).get("attempts", 0) + 1
+    base_sha = git(["rev-parse", "--short", base]).stdout.strip()
+    set_status(t, st, "running", attempts=attempt, spec_sha=t["_sha"], base_sha=base_sha, run=run_name)
+    publish(st, msg=f"start {tid}")
+    return attempt, base_sha, f"agent/{tid}-a{attempt}"
+
+
+def run_task(t, st, run_dir: Path) -> dict:
+    """Batch mode (claude / cli): the whole task in an isolated worktree, no human in the loop."""
+    tid, base = str(t["id"]), CFG["BASE_BRANCH"]
+    if needs_holdout(t):
+        print(f"  viết bài test ẩn cho {tid} ...")
+        if not write_holdout(t):
+            raise SkipTask("test-writer không viết được bài test ẩn")
+    prev = st.get(tid, {}).get("last_fail")
+    attempt, base_sha, branch = begin_attempt(t, st, run_dir.name)
+    wt = Path(CFG["WORKTREE_ROOT"]) / tid
+    if wt.exists():
+        git(["worktree", "remove", "--force", str(wt)], check=False)
+    git(["branch", "-D", branch], check=False)
+    wt.parent.mkdir(parents=True, exist_ok=True)
+    git(["worktree", "add", "-q", "-b", branch, str(wt), base])
+    out = run_dir / tid
+    out.mkdir(parents=True, exist_ok=True)
+    try:
+        w = call_agent(implementer_prompt(t, branch, prev), role="worker", cwd=wt, agent="implementer",
+                       timeout_min=int(CFG["TASK_TIMEOUT_MIN"]))
+        (out / "worker.txt").write_text(w["result"])
+        if w["limit"]:
+            set_status(t, st, "queued", attempts=attempt - 1)
+            raise LimitHit(w["result"][-300:])
+        g = grade(t, wt)
+        review = {"verdict": "SKIPPED", "reasons": [], "risks": [], "human_should_check": []}
+        if flag("REVIEW") and g["has_diff"]:
+            rv = call_agent(reviewer_prompt(t, g), role="reviewer", cwd=wt, agent="reviewer", timeout_min=20)
+            if rv["limit"]:
+                set_status(t, st, "queued", attempts=attempt - 1)
+                raise LimitHit(rv["result"][-300:])
+            review = parse_review(rv["result"])
+        return finalize(t, st, wt, branch, attempt, base_sha, g, review, out, w["cost"])
+    finally:
+        git(["worktree", "remove", "--force", str(wt)], check=False)
 
 
 def notify(text: str):
@@ -1059,40 +1162,74 @@ def notify(text: str):
         print(f"telegram: {e}")
 
 
-def cmd_run(args):
+def preflight(require_clean: bool = True) -> bool:
+    """Shared checks before a work session. Returns True if the remote lock was taken."""
+    if not git(["ls-files", ".claude/settings.json", "eval/checks.sh"], check=False).stdout.strip():
+        sys.exit("agent-kit chưa được commit lên repo. Commit + push trước.")
+    if flag("GIT_PULL") and has_origin():
+        if require_clean and git(["status", "--porcelain", "--untracked-files=no"]).stdout.strip():
+            msg = "Dừng: repo trên máy này có thay đổi chưa commit → không pull được spec mới. Commit/push hoặc dọn sạch rồi chạy lại."
+            notify(f"agent-kit · {ROOT.name} · {HOST}\n{msg}")
+            sys.exit(msg)
+        cur = git(["rev-parse", "--abbrev-ref", "HEAD"]).stdout.strip()
+        if cur != CFG["BASE_BRANCH"]:
+            sys.exit(f"Dừng: đang ở nhánh `{cur}`. Chuyển về `{CFG['BASE_BRANCH']}` rồi chạy lại.")
+        r = git(["pull", "-q", "--ff-only"], check=False)
+        if r.returncode != 0:
+            msg = f"Dừng: git pull --ff-only thất bại ({r.stderr.strip()[:200]}). Push commit của máy này lên trước rồi chạy lại."
+            notify(f"agent-kit · {ROOT.name} · {HOST}\n{msg}")
+            sys.exit(msg)
+    try:
+        acquire_lock()
+    except LockHeld as e:
+        sys.exit(f"Máy khác đang làm việc: {e}")
+    return LOG.enabled()
+
+
+def summarize(results, todo, stopped, run_dir: Path, started: str, st: dict) -> str:
+    lines = [f"agent-kit · {ROOT.name} · {HOST} · {dt.datetime.now().strftime('%Y-%m-%d %H:%M')}"]
+    for r in results:
+        lines.append(f"{'✅' if r['passed'] else '❌'} {r['id']} {r.get('pr') or r.get('branch') or ''}".rstrip())
+        if not r["passed"]:
+            lines += [f"   · {x}" for x in r["reasons"][:3]]
+    if not todo:
+        lines.append("Không có task nào sẵn sàng.")
+    if stopped:
+        lines.append(stopped)
+    lines.append("Chi tiết: python3 runner/kit.py report")
+    summary = "\n".join(lines)
+    (run_dir / "SUMMARY.md").write_text(summary + "\n")
+    (run_dir / "meta.json").write_text(json.dumps(
+        {"host": HOST, "agent": agent_mode(), "started": started, "finished": now(),
+         "tasks": [r["id"] for r in results], "stopped": stopped}, indent=2, ensure_ascii=False))
+    if not publish(st, run_dir, meta={"last_run": started}, msg="work summary") and LOG.enabled():
+        summary += f"\n(!) Không chia sẻ được kết quả lên nhánh {LOG_BRANCH}"
+    print(summary)
+    notify(summary)
+    return summary
+
+
+def new_run_dir() -> Path:
+    d = STATE_DIR / "runs" / (dt.datetime.now().strftime("%Y-%m-%d_%H%M%S") + f"_{HOST}")
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def work_batch(args):
     STATE_DIR.mkdir(parents=True, exist_ok=True)
-    lock = STATE_DIR / "run.lock"
+    lock = STATE_DIR / "work.lock"
     if lock.exists() and age_hours(dt.datetime.fromtimestamp(lock.stat().st_mtime, dt.timezone.utc).isoformat()) < float(CFG["LOCK_HOURS"]):
-        sys.exit("Đang có một phiên run khác trên máy này (.agent-kit/run.lock).")
-    if not claude_available():
-        sys.exit(NO_CLAUDE_MSG.format(bin=CFG["CLAUDE_BIN"]))
+        sys.exit("Đang có một phiên work khác trên máy này (.agent-kit/work.lock).")
     lock.write_text(str(os.getpid()))
     remote_locked = False
     try:
-        if not git(["ls-files", ".claude/settings.json"], check=False).stdout.strip():
-            sys.exit("agent-kit chưa được commit lên repo → worktree sẽ không có rào chắn. Commit trước.")
-        if flag("GIT_PULL") and has_origin():
-            if git(["status", "--porcelain", "--untracked-files=no"]).stdout.strip():
-                msg = "Dừng: repo trên máy này có thay đổi chưa commit → không pull được spec mới. Commit/push hoặc dọn sạch rồi chạy lại."
-                notify(f"agent-kit · {ROOT.name} · {HOST}\n{msg}")
-                sys.exit(msg)
-            r = git(["pull", "-q", "--ff-only"], check=False)
-            if r.returncode != 0:
-                msg = f"Dừng: git pull --ff-only thất bại ({r.stderr.strip()[:200]}). Push commit của máy này lên trước rồi chạy lại."
-                notify(f"agent-kit · {ROOT.name} · {HOST}\n{msg}")
-                sys.exit(msg)
-        try:
-            acquire_lock()
-            remote_locked = LOG.enabled()
-        except LockHeld as e:
-            sys.exit(f"Máy khác đang chạy: {e}")
+        remote_locked = preflight()
         cmd_sync(quiet=True)
         tasks = load_tasks()
         st, _, _ = view_state(fetch=False)
-        todo = ready_tasks(tasks, st)[: args.max or int(CFG["MAX_TASKS"])]
-        started = now()
-        run_dir = STATE_DIR / "runs" / (dt.datetime.now().strftime("%Y-%m-%d_%H%M%S") + f"_{HOST}")
-        run_dir.mkdir(parents=True, exist_ok=True)
+        todo = [t for t in ready_tasks(tasks, st) if not args.task or str(t["id"]) == args.task]
+        todo = todo[: args.max or int(CFG["MAX_TASKS"])]
+        started, run_dir = now(), new_run_dir()
         results, stopped = [], ""
         for t in todo:
             print(f"▶ {t['id']}")
@@ -1102,38 +1239,175 @@ def cmd_run(args):
                 stopped = f"Dừng sớm: chạm giới hạn gói ({e})"
                 break
             except SkipTask as e:
-                rec = st.setdefault(str(t["id"]), {})
                 set_status(t, st, "queued", note=f"bỏ qua phiên này: {e}")
-                results.append({"id": str(t["id"]), "passed": False, "reasons": [f"bỏ qua (không tính lượt thử): {e}"],
-                                "pr": "", "cost": 0})
+                results.append({"id": str(t["id"]), "passed": False, "reasons": [f"bỏ qua (không tính lượt thử): {e}"]})
             except Exception as e:
                 set_status(t, st, "queued", last_fail=f"- lỗi runner: {e}")
-                results.append({"id": str(t["id"]), "passed": False, "reasons": [f"lỗi runner: {e}"], "pr": "", "cost": 0})
+                results.append({"id": str(t["id"]), "passed": False, "reasons": [f"lỗi runner: {e}"]})
             publish(st, run_dir, msg=f"done {t['id']}")
-        lines = [f"agent-kit · {ROOT.name} · {HOST} · {dt.datetime.now().strftime('%Y-%m-%d %H:%M')}"]
-        for r in results:
-            mark = "✅" if r["passed"] else "❌"
-            lines.append(f"{mark} {r['id']} {r.get('pr') or r.get('branch') or ''}".rstrip())
-            if not r["passed"]:
-                lines += [f"   · {x}" for x in r["reasons"][:3]]
-        if not todo:
-            lines.append("Không có task nào sẵn sàng.")
-        if stopped:
-            lines.append(stopped)
-        lines.append("Chi tiết: python3 runner/kit.py report")
-        summary = "\n".join(lines)
-        (run_dir / "SUMMARY.md").write_text(summary + "\n")
-        (run_dir / "meta.json").write_text(json.dumps(
-            {"host": HOST, "started": started, "finished": now(), "tasks": [r["id"] for r in results],
-             "stopped": stopped}, indent=2, ensure_ascii=False))
-        if not publish(st, run_dir, meta={"last_run": started}, msg="run summary") and LOG.enabled():
-            lines.append(f"(!) Không chia sẻ được kết quả lên nhánh {LOG_BRANCH}")
-        print(summary)
-        notify(summary)
+        summarize(results, todo, stopped, run_dir, started, st)
     finally:
         if remote_locked:
             release_lock()
         lock.unlink(missing_ok=True)
+
+
+# ── chat mode: one step per call; the chat agent runs `kit.py work` again after each step ──
+SESSION = STATE_DIR / "session.json"
+
+
+def load_session() -> dict:
+    try:
+        return json.loads(SESSION.read_text())
+    except Exception:
+        return {}
+
+
+def save_session(s: dict) -> None:
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    SESSION.write_text(json.dumps(s, indent=2, ensure_ascii=False))
+
+
+def say_step(title: str, body: str, next_cmd: str = "python3 runner/kit.py work"):
+    bar = "─" * 64
+    print(f"\n{bar}\n▶ BƯỚC TIẾP THEO: {title}\n{bar}\n{body.strip()}\n{bar}")
+    if next_cmd:
+        print(f"Xong bước này thì chạy: {next_cmd}")
+
+
+def chat_start_implement(t: dict, st: dict, s: dict):
+    tid = str(t["id"])
+    prev = st.get(tid, {}).get("last_fail")
+    attempt, base_sha, branch = begin_attempt(t, st, s["run_dir"])
+    git(["branch", "-D", branch], check=False)
+    git(["checkout", "-q", "-b", branch, CFG["BASE_BRANCH"]])
+    s.update(stage="implement", attempt=attempt, base_sha=base_sha, branch=branch, fixes=0)
+    save_session(s)
+    say_step(f"LÀM TASK {tid} (vai implementer)",
+             "Đọc và làm đúng theo `.claude/agents/implementer.md`.\n"
+             "Bạn đang ở nhánh `" + branch + "` (kit.py đã tạo). Commit trên nhánh này, không push.\n\n"
+             + implementer_prompt(t, branch, prev))
+
+
+def chat_finish(t, st, s, g, review):
+    out = STATE_DIR / "runs" / s["run_dir"] / str(t["id"])
+    r = finalize(t, st, ROOT, s["branch"], s["attempt"], s["base_sha"], g, review, out)
+    git(["checkout", "-q", CFG["BASE_BRANCH"]], check=False)
+    SESSION.unlink(missing_ok=True)
+    summarize([r], [t], "", STATE_DIR / "runs" / s["run_dir"], s["started"], st)
+    release_lock()
+    print(f"\nĐã trở về nhánh `{CFG['BASE_BRANCH']}`. Bài làm nằm ở nhánh `{s['branch']}`"
+          + (f", PR: {r['pr']}" if r.get("pr") else "") + ".")
+    print("Còn task khác? Chạy lại: python3 runner/kit.py work")
+
+
+def work_chat(args):
+    s = load_session()
+    tasks = load_tasks()
+    if args.abort:
+        if not s:
+            sys.exit("Không có phiên nào đang mở.")
+        st, _, _ = view_state(fetch=False)
+        t = tasks.get(s["task"])
+        if t and s.get("attempt"):
+            set_status(t, st, "queued", attempts=s["attempt"] - 1, note="phiên chat bị huỷ")
+            publish(st, msg=f"abort {s['task']}")
+        git(["checkout", "-q", CFG["BASE_BRANCH"]], check=False)
+        SESSION.unlink(missing_ok=True)
+        release_lock()
+        print(f"Đã huỷ phiên của {s['task']} (không tính lượt thử). Nhánh làm dở vẫn giữ lại: {s.get('branch', '-')}")
+        return
+
+    st, _, _ = view_state(fetch=False)
+    if not s:
+        if args.task and args.task not in tasks:
+            sys.exit(f"Không có task '{args.task}'.")
+        preflight()
+        cmd_sync(quiet=True)
+        st, _, _ = view_state(fetch=False)
+        ready = [t for t in ready_tasks(tasks, st) if not args.task or str(t["id"]) == args.task]
+        if not ready:
+            release_lock()
+            print("Không có task nào sẵn sàng. Xem: python3 runner/kit.py status")
+            return
+        t = ready[0]
+        s = {"task": str(t["id"]), "stage": "", "started": now(), "host": HOST,
+             "run_dir": new_run_dir().name}
+        save_session(s)
+        print(f"Bắt đầu task {t['id']}.")
+        if needs_holdout(t):
+            shutil.rmtree(STATE_DIR / "holdout-staging" / str(t["id"]), ignore_errors=True)
+            s["stage"] = "holdout"
+            save_session(s)
+            say_step(f"VIẾT BÀI TEST ẨN cho {t['id']} (vai test-writer)",
+                     "Nên làm trong MỘT CUỘC CHAT MỚI, để agent làm bài sau không nhớ nội dung test.\n"
+                     "Đọc và làm đúng theo `.claude/agents/test-writer.md`.\n\n" + holdout_prompt(t))
+            return
+        chat_start_implement(t, st, s)
+        return
+
+    t = tasks.get(s["task"])
+    if not t:
+        sys.exit(f"Task {s['task']} của phiên đang mở không còn trong tasks/. Huỷ: python3 runner/kit.py work --abort")
+
+    if s["stage"] == "holdout":
+        if not collect_holdout(str(t["id"])):
+            say_step(f"VIẾT BÀI TEST ẨN cho {t['id']} (chưa thấy file nào)",
+                     f"Chưa có file nào trong `.agent-kit/holdout-staging/{t['id']}/`.\n\n" + holdout_prompt(t))
+            return
+        chat_start_implement(t, st, s)
+        return
+
+    if s["stage"] == "implement":
+        g = grade(t, ROOT)
+        if not g["ok"]:
+            s["fixes"] = s.get("fixes", 0) + 1
+            save_session(s)
+            limit = int(os.environ.get("AGENT_KIT_MAX_FIX_ATTEMPTS", "3"))
+            if s["fixes"] <= limit:
+                detail = "\n".join(f"- {x}" for x in g["reasons"])
+                if not g["checks_ok"]:
+                    detail += "\n\nĐuôi log eval/checks.sh:\n" + g["checks_tail"]
+                if g["hold_ok"] is False:
+                    detail += "\n\nBài test ẩn FAIL (nội dung test được giữ kín). Đối chiếu lại Interface và Acceptance."
+                say_step(f"SỬA TASK {t['id']} (lần {s['fixes']}/{limit})",
+                         "Chấm tự động chưa đạt:\n" + detail +
+                         "\n\nSửa code (không sửa test, eval/, tasks/...), commit, rồi chạy lại.")
+                return
+            chat_finish(t, st, s, g, {"verdict": "SKIPPED", "reasons": [f"hết {limit} lần sửa"]})
+            return
+        if flag("REVIEW"):
+            s.update(stage="review", grade=g)
+            save_session(s)
+            (STATE_DIR / "reviews").mkdir(parents=True, exist_ok=True)
+            say_step(f"CHẤM ĐỘC LẬP task {t['id']} (vai reviewer)",
+                     "Làm trong MỘT CUỘC CHAT MỚI (reviewer không được là agent vừa làm bài).\n"
+                     "Đọc và làm đúng theo `.claude/agents/reviewer.md`. Không sửa code.\n"
+                     f"Ghi đúng một khối JSON kết quả vào `.agent-kit/reviews/{t['id']}.json`.\n\n"
+                     + reviewer_prompt(t, g))
+            return
+        chat_finish(t, st, s, g, {"verdict": "SKIPPED", "reasons": [], "risks": []})
+        return
+
+    if s["stage"] == "review":
+        f = STATE_DIR / "reviews" / f"{t['id']}.json"
+        if not f.exists():
+            say_step(f"CHẤM ĐỘC LẬP task {t['id']} (chưa thấy kết quả)",
+                     f"Chưa có `.agent-kit/reviews/{t['id']}.json`.\n\n" + reviewer_prompt(t, s["grade"]))
+            return
+        review = parse_review(f.read_text())
+        f.unlink()
+        chat_finish(t, st, s, s["grade"], review)
+        return
+
+
+def cmd_work(args):
+    mode = agent_mode()
+    if mode == "chat" or load_session():
+        return work_chat(args)
+    if args.abort:
+        sys.exit("Không có phiên chat nào đang mở.")
+    return work_batch(args)
 
 
 def main():
@@ -1148,16 +1422,16 @@ def main():
     p = sub.add_parser("doctor"); p.add_argument("--fix", action="store_true"); p.set_defaults(fn=cmd_doctor)
     p = sub.add_parser("plan"); p.add_argument("design_dir"); p.set_defaults(fn=cmd_plan)
     p = sub.add_parser("approve"); p.add_argument("target"); p.set_defaults(fn=cmd_approve)
-    for name in ("run", "night"):  # `night` kept as an alias for older setups
-        p = sub.add_parser(name); p.add_argument("--max", type=int, default=0); p.set_defaults(fn=cmd_run)
+    p = sub.add_parser("work"); p.add_argument("--max", type=int, default=0)
+    p.add_argument("--task"); p.add_argument("--abort", action="store_true"); p.set_defaults(fn=cmd_work)
     sub.add_parser("sync").set_defaults(fn=cmd_sync)
     sub.add_parser("import").set_defaults(fn=cmd_import)
     p = sub.add_parser("set"); p.add_argument("id"); p.add_argument("status"); p.set_defaults(fn=cmd_set)
     a = ap.parse_args()
     try:
         a.fn(a)
-    except NoClaude as e:
-        sys.exit(str(e))
+    except NeedsChat:
+        sys.exit("Lệnh này cần agent CLI; máy này đang ở chế độ chat (AGENT=chat hoặc không có CLI).")
 
 
 if __name__ == "__main__":

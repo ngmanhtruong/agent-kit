@@ -12,10 +12,11 @@ Lưu ý: `template/CLAUDE.md`, `template/docs/` là **mẫu** cho project đích
 - `README.md` — hướng dẫn đầy đủ cho người dùng và agent. Sửa hành vi thì **phải** sửa README tương ứng.
 
 ## Bất biến — không được phá
-1. Trạng thái chạy không ghi vào `tasks/*.md` (tránh xung đột giữa các máy). Trạng thái dùng chung nằm trên nhánh orphan `agent-kit/log`; **mỗi máy chỉ ghi file của chính nó** (`state/<máy>.json`, `runs/<máy>/...`), đọc thì gộp theo `updated` (UTC) mới nhất. `lock.json` trên nhánh đó chống hai máy chạy `run` cùng lúc. Không có khái niệm máy "ngày"/"đêm": mọi máy ngang hàng, phiên `run` chạy lúc nào cũng được.
+1. Trạng thái chạy không ghi vào `tasks/*.md` (tránh xung đột giữa các máy). Trạng thái dùng chung nằm trên nhánh orphan `agent-kit/log`; **mỗi máy chỉ ghi file của chính nó** (`state/<máy>.json`, `runs/<máy>/...`), đọc thì gộp theo `updated` (UTC) mới nhất. `lock.json` trên nhánh đó chống hai máy chạy `work` cùng lúc. Không có khái niệm máy "ngày"/"đêm": mọi máy ngang hàng, phiên `work` chạy lúc nào cũng được.
 1b. `status`, `report`, `doctor` (không `--fix`) **chỉ đọc**: chỉ `git fetch` ref nhánh log, không sửa file, không đổi nhánh, không push, không ghi `.agent-kit/state.json`.
-1c. `run` không chạy spec cũ: `git pull --ff-only` thất bại thì dừng.
-1d. Chỉ `run` (và `plan` khi có CLI) được gọi Claude Code. `approve`, `status`, `report`, `doctor`, `sync`, `set`, `import` không bao giờ gọi AI — người dùng có máy chỉ có Copilot. Bài test ẩn được viết trong `run`, trên máy chạy test, trước khi implementer bắt đầu.
+1c. `work` không chạy spec cũ: `git pull --ff-only` thất bại thì dừng.
+1d. `kit.py` chạy với mọi agent qua `call_agent()` (chế độ `claude` / `cli` qua `AGENT_CMD` / `chat`). Không gọi thẳng một CLI cụ thể ở chỗ khác. Chỉ `work` và `plan` cần AI; `approve`, `status`, `report`, `doctor`, `sync`, `set`, `import` không bao giờ gọi AI. Chế độ `chat`: `work` là máy trạng thái, mỗi lần chạy làm một bước, lưu ở `.agent-kit/session.json`, in **BƯỚC TIẾP THEO**. Bài test ẩn được viết trong `work`, trước khi implementer bắt đầu.
+1e. Việc chấm (`grade()`) phải do kit.py làm và giống nhau cho mọi agent: có diff, không sửa vùng bảo vệ (`PROTECTED` trong kit.py, giữ khớp với hooks), checks pass, test ẩn pass. Không bao giờ tin agent tự báo kết quả.
 2. Test ẩn không bao giờ nằm trong repo đích hay trong tầm đọc của worker/implementer.
 3. Chỉ runner (script) được push, tạo PR/issue. Agent thì không.
 4. Hook dùng `onFailure: "block"`: hook lỗi thì chặn.
@@ -33,7 +34,7 @@ Lưu ý: `template/CLAUDE.md`, `template/docs/` là **mẫu** cho project đích
 ```bash
 python3 -m py_compile install.py template/runner/kit.py template/.claude/hooks/*.py
 ```
-Rồi chạy thử end-to-end: cài vào một repo git tạm, dùng một file `claude` giả (script in JSON) qua `CLAUDE_BIN` trong `runner/config.env`, chạy `kit.py approve` và `kit.py run`, kiểm tra cả nhánh PASS lẫn FAIL.
+Rồi chạy thử end-to-end: cài vào một repo git tạm, dùng một file `claude` giả (script in JSON) qua `CLAUDE_BIN` trong `runner/config.env`, chạy `kit.py approve` và `kit.py work` ở cả ba chế độ (`AGENT=claude` với claude giả, `AGENT=cli` với script giả đọc stdin, `AGENT=chat` bằng cách tự làm từng bước), kiểm tra cả nhánh PASS lẫn FAIL.
 
 Hook test nhanh:
 ```bash
