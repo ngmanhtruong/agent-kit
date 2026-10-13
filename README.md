@@ -59,10 +59,12 @@ Các nguyên tắc đi kèm:
  2. kit.py plan                          a. tạo nhánh + worktree riêng       8. Merge hoặc đóng PR
     → planner sinh tasks nháp            b. WORKER làm bài                   9. kit.py sync
  3. Bạn sửa, trả lời câu hỏi mở          c. eval/checks.sh  (thang điểm)        → task "done",
- 4. kit.py approve                       d. test ẩn         (worker không thấy)    mở khoá task phụ thuộc
+ 4. kit.py approve (không cần Claude)    d. test ẩn         (worker không thấy)    mở khoá task phụ thuộc
     → GitHub Issue                       e. REVIEWER chấm độc lập
-    → TEST-WRITER viết test ẩn           f. PASS → push + mở PR
-    → git push                              FAIL → thử lại, kèm lý do lần trước
+    → git push                           f. PASS → push + mở PR
+                                            FAIL → thử lại, kèm lý do lần trước
+                                         (trước bước a: TEST-WRITER viết test ẩn
+                                          nếu task có holdout: true)
                                      6. Báo cáo → file + Telegram
 ```
 
@@ -75,7 +77,7 @@ Mỗi công việc có một file hướng dẫn riêng trong `.claude/agents/<t
 | **context-writer** | Quét codebase → đề xuất `CLAUDE.md`, `architecture.md`, `checks.sh` | Agent chủ | chỉ `.agent-kit/proposals/` |
 | **planner** | Design → epic + tasks nháp | Agent chủ hoặc `kit.py plan` | chỉ `tasks/` |
 | **bug-triager** | Bug report → task bug nháp có bước tái hiện | Agent chủ | chỉ `tasks/bugs/` |
-| **test-writer** | Task → bài test ẩn | `kit.py approve` hoặc agent chủ | chỉ `.agent-kit/holdout-staging/` |
+| **test-writer** | Task → bài test ẩn | `kit.py night` (trước khi làm task) | chỉ `.agent-kit/holdout-staging/` |
 | **implementer** | Làm một task đã duyệt | `kit.py night` hoặc agent chủ | mọi nơi **trừ** vùng bảo vệ |
 | **reviewer** | Chấm độc lập → JSON PASS/FAIL | `kit.py night` hoặc agent chủ | không ghi gì |
 
@@ -143,6 +145,8 @@ your-project/
 │   ├── kit.py                      Bộ điều phối (plan / approve / night / sync / ...)
 │   ├── config.env.example          Mẫu cấu hình
 │   └── config.env                ★ Cấu hình riêng từng máy (bạn điền, KHÔNG commit)
+├── .github/
+│   └── copilot-instructions.md     Dặn Copilot đọc CLAUDE.md + orchestration và tự giữ quy tắc
 ├── .claude/
 │   ├── settings.json               Permissions + đăng ký hooks
 │   ├── hooks/
@@ -190,14 +194,28 @@ your-project/
 
 ## 4. Cài đặt
 
-### 4.1 Yêu cầu (trên cả MacBook và mini PC)
+### 4.1 Yêu cầu
 
-| Công cụ | Kiểm tra | Ghi chú |
+| Công cụ | Kiểm tra | Cần trên máy nào |
 |---|---|---|
-| `git` | `git --version` | |
-| `python3` ≥ 3.8 | `python3 --version` | Chỉ dùng thư viện chuẩn, không cần `pip install` |
-| `claude` (Claude Code) | `claude --version` | Đã đăng nhập gói Pro. Cần bản **≥ 2.1.295** (hook `onFailure`, cờ `--permission-prompts`) |
-| `gh` (GitHub CLI) | `gh auth status` | Chỉ cần nếu bật `GH_SYNC=1`. Đăng nhập bằng `gh auth login` |
+| `git` | `git --version` | Mọi máy |
+| `python3` ≥ 3.8 | `python3 --version` | Mọi máy. Chỉ dùng thư viện chuẩn, không cần `pip install` |
+| `gh` (GitHub CLI) | `gh auth status` | Mọi máy, nếu bật `GH_SYNC=1`. Đăng nhập bằng `gh auth login` |
+| `claude` (Claude Code) | `claude --version` | **Chỉ máy chạy `night`** (và máy muốn chạy `plan` tự động). Đã đăng nhập gói Pro, bản **≥ 2.1.295** |
+
+### 4.1.1 Máy không có Claude Code (ví dụ chỉ có Copilot Chat trong VS Code)
+
+Máy như vậy vẫn làm được toàn bộ phần việc ban ngày:
+
+| Việc | Cách làm |
+|---|---|
+| `approve`, `status`, `report`, `doctor`, `sync`, `set`, `import` | Chạy bình thường, các lệnh này không gọi AI |
+| Chia design thành task | `kit.py plan design/<feature>` in ra một đoạn prompt; dán vào Copilot Chat (chế độ Agent). Copilot đọc `.claude/agents/planner.md` và ghi task nháp vào `tasks/` |
+| Các việc khác (bug-triager, context-writer, implementer...) | Nói với Copilot: "đọc `.claude/agents/<tên>.md` và làm theo cho ...". `.github/copilot-instructions.md` (được cài sẵn) dặn Copilot đọc `CLAUDE.md`, `docs/orchestration.md` và tự giữ quy tắc |
+| Bài test ẩn | Không cần làm gì: máy chạy đêm tự viết, ngay trước khi làm task |
+| `night` | Không chạy được; báo lỗi rõ ràng và dừng |
+
+Lưu ý: rào cứng (hooks) chỉ chạy trong Claude Code. Copilot chỉ được nhắc bằng văn bản (rào mềm), nên hãy xem kỹ những gì Copilot sửa trước khi commit. Mọi task vẫn được chấm đầy đủ (checks, test ẩn, reviewer) khi chạy đêm trên máy có Claude Code.
 
 ### 4.2 Cài vào project có sẵn
 
@@ -357,7 +375,9 @@ git add tasks && git commit -m "approve <FEAT>" && git push
 - Từ chối task có Acceptance trống hoặc còn placeholder.
 - Đổi `status: draft` → `approved` trong file.
 - Nếu `GH_SYNC=1`: tạo GitHub Issue (nhãn `agent-kit`, loại, `status:queued`), ghi số issue vào file.
-- Nếu task có `holdout: true` và đã đặt `HOLDOUT_DIR`: gọi test-writer viết test ẩn, chuyển ra `HOLDOUT_DIR/<task-id>/`.
+- **Không gọi AI**, chạy được trên máy không có Claude Code.
+
+Bài test ẩn cho task `holdout: true` được viết trên **máy chạy đêm**, ngay trước khi làm task đó: test-writer đọc spec và code gốc hiện tại, ghi ra `HOLDOUT_DIR/<task-id>/` của chính máy đó. Đã có thì dùng lại. Test-writer không viết được thì task được bỏ qua đêm đó mà không tính lượt thử.
 
 ### Bước 5 — Đêm (mini PC, tự động)
 
@@ -454,9 +474,9 @@ Chạy từ thư mục gốc project: `python3 runner/kit.py <lệnh>`
 
 | Lệnh | Tác dụng | Gọi Claude? |
 |---|---|---|
-| `plan design/<feature>` | Planner đọc design → sinh epic + tasks nháp vào `tasks/<feature>/` | 1 lần |
-| `approve <id\|epic\|all>` | Duyệt nháp → issue + test ẩn | 1 lần/task có holdout |
-| `night [--max N]` | Chạy tối đa N task sẵn sàng (mặc định `MAX_TASKS`) | 2 lần/task (worker + reviewer) |
+| `plan design/<feature>` | Planner đọc design → sinh epic + tasks nháp vào `tasks/<feature>/`. Không có Claude Code → in prompt để dán vào Copilot Chat | 1 lần (hoặc không) |
+| `approve <id\|epic\|all>` | Duyệt nháp → GitHub Issue | Không |
+| `night [--max N]` | Chạy tối đa N task sẵn sàng (mặc định `MAX_TASKS`). Cần Claude Code | 2 lần/task (worker + reviewer), +1 lần đầu nếu cần viết test ẩn |
 | `sync` | Gộp trạng thái mọi máy; nhãn GitHub sửa tay; PR merged → `done`, đóng → `failed`; epic xong khi mọi task xong; chia sẻ kết quả | Không |
 | `set <id> <status>` | Đổi trạng thái tay, ví dụ `failed` → `queued` để chạy lại (đặt lại số lần thử) | Không |
 | `doctor --fix` | Đưa task kẹt `running` về `queued`, rồi `sync` | Không |
@@ -541,7 +561,7 @@ Lưu ý bảo mật: log của worker được đẩy lên nhánh `agent-kit/log
 
 ### 8.2 Giới hạn gói Pro
 
-Mỗi task tốn khoảng 2–3 lượt gọi Claude (worker, reviewer, cộng test-writer lúc approve). Gói Pro giới hạn theo cửa sổ thời gian nên runner chạy **tuần tự**, ít task, và **tự dừng** khi chạm giới hạn (task dở được trả về hàng đợi, không tính là một lần thử).
+Mỗi task tốn khoảng 2–3 lượt gọi Claude (worker, reviewer, cộng test-writer ở lần chạy đầu nếu task có test ẩn). Gói Pro giới hạn theo cửa sổ thời gian nên runner chạy **tuần tự**, ít task, và **tự dừng** khi chạm giới hạn (task dở được trả về hàng đợi, không tính là một lần thử).
 
 ---
 

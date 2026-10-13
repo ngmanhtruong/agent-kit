@@ -9,7 +9,7 @@ Kiểm tra (chỉ đọc — an toàn chạy trên bất kỳ máy nào, bất k
 
 Làm việc:
   python3 runner/kit.py plan design/<feature>    planner chia design thành tasks nháp
-  python3 runner/kit.py approve <id|epic|all>    duyệt nháp → GitHub Issue + bài test ẩn
+  python3 runner/kit.py approve <id|epic|all>    duyệt nháp → GitHub Issue (không cần Claude)
   python3 runner/kit.py night [--max N]          chạy các task sẵn sàng (cron)
   python3 runner/kit.py sync                     PR merged → done; cập nhật và chia sẻ trạng thái
   python3 runner/kit.py import                   GitHub Issue nhãn 'agent-ready' → task nháp
@@ -380,8 +380,24 @@ def release_lock() -> None:
 
 
 # ───────────────────────── claude ─────────────────────────
+class NoClaude(Exception):
+    pass
+
+
+def claude_available() -> bool:
+    b = CFG["CLAUDE_BIN"]
+    return bool(shutil.which(b)) or Path(b).expanduser().is_file()
+
+
+NO_CLAUDE_MSG = ("Máy này không có Claude Code CLI (`{bin}`). Lệnh này cần gọi agent nên phải chạy "
+                 "trên máy có cài `claude` (ví dụ máy chạy đêm). Các lệnh approve, status, report, "
+                 "doctor, sync, set, import vẫn dùng được ở đây.")
+
+
 def claude(prompt: str, role: str, cwd: Path, agent: str = "", timeout_min: int = 60,
            extra_env: dict = None) -> dict:
+    if not claude_available():
+        raise NoClaude(NO_CLAUDE_MSG.format(bin=CFG["CLAUDE_BIN"]))
     cmd = [CFG["CLAUDE_BIN"], "-p", prompt, "--output-format", "json",
            "--permission-mode", "acceptEdits", "--permission-prompts", "none"]
     if agent:
@@ -576,7 +592,11 @@ def cmd_doctor(args):
     else:
         say("✗", "thiếu runner/config.env → cp runner/config.env.example runner/config.env")
     ok, v = claude_version_ok()
-    say("✓" if ok else ("✗" if ok is None else "!"), f"claude {v}" + ("" if ok else " (cần ≥ 2.1.295)"))
+    if ok is None and not claude_available():
+        say("!", "máy này không có Claude Code CLI → không chạy được `plan` (tự động) và `night`; "
+                 "approve/status/report/doctor/sync/set/import vẫn dùng được")
+    else:
+        say("✓" if ok else ("✗" if ok is None else "!"), f"claude {v}" + ("" if ok else " (cần ≥ 2.1.295)"))
     if flag("GH_SYNC"):
         r = run(["gh", "auth", "status"], check=False) if shutil.which("gh") else None
         say("✓" if r and r.returncode == 0 else "✗", "gh đã đăng nhập" if r and r.returncode == 0 else "gh chưa cài/chưa đăng nhập (GH_SYNC=1)")
@@ -644,8 +664,6 @@ def cmd_doctor(args):
                 say("✗", f"{t['id']}: đã duyệt nhưng Acceptance trống")
             if flag("GH_SYNC") and not t.get("issue"):
                 say("!", f"{t['id']}: đã duyệt nhưng chưa có GitHub Issue")
-            if t.get("holdout") is True and CFG.get("HOLDOUT_DIR") and not (Path(CFG["HOLDOUT_DIR"]) / str(t["id"])).exists():
-                say("!", f"{t['id']}: holdout: true nhưng máy này không có test ẩn (bình thường nếu máy khác chạy đêm)")
     if not problems and tasks:
         say("✓", f"{len(tasks)} task đọc được")
 
@@ -704,6 +722,15 @@ def cmd_plan(args):
               f"Các file design:\n{files}\n\n"
               f"Ghi vào `tasks/{feature}/`. Theo đúng hướng dẫn của bạn và `tasks/_TEMPLATE.md`. "
               f"Trường `design:` của mỗi task = `{d.relative_to(ROOT)}`.")
+    if not claude_available():
+        print("Máy này không có Claude Code CLI. Dán đoạn dưới vào Copilot Chat (chế độ Agent) "
+              "hoặc trợ lý AI khác đang mở repo này:\n")
+        print("─" * 60)
+        print("Đọc và làm đúng theo `.claude/agents/planner.md` (bạn đóng vai planner).\n" + prompt +
+              "\nChỉ được tạo/sửa file trong `tasks/`. Mọi task để `status: draft`.")
+        print("─" * 60)
+        print(f"\nXong thì xem lại tasks/{feature}/ rồi chạy: python3 runner/kit.py approve {feature.upper()}")
+        return
     print(f"Planner đang đọc {d.relative_to(ROOT)} ...")
     r = claude(prompt, role="planner", cwd=ROOT, agent="planner", timeout_min=30)
     print(r["result"])
@@ -748,10 +775,10 @@ def cmd_approve(args):
                 print(f"  ! không tạo được issue: {r.stderr.strip()[:200]}")
         if t["type"] != "epic":
             set_status(t, st, "queued", attempts=0, last_fail=None)
-            if t.get("holdout") is True and CFG.get("HOLDOUT_DIR"):
-                write_holdout(t)
         print(f"✓ {t['id']} approved" + (f" (#{t['issue']})" if t.get("issue") else ""))
     publish(st, msg="approve")
+    if any(t.get("holdout") is True for t in picked):
+        print("\nTask có holdout: true → bài test ẩn sẽ được viết trên máy chạy đêm, ngay trước khi làm task.")
     print("\nNhớ commit + push thư mục tasks/ để máy chạy đêm kéo về.")
 
 
@@ -762,14 +789,26 @@ def write_holdout(t: dict):
     prompt = (f"Viết bài kiểm tra ẩn cho task `{t['_path'].relative_to(ROOT)}` "
               f"(design: `{t.get('design', '')}`). Ghi vào `.agent-kit/holdout-staging/{tid}/`.")
     r = claude(prompt, role="test-writer", cwd=ROOT, agent="test-writer", timeout_min=20)
-    if not staging.exists() or not any(staging.rglob("*")):
+    if r["limit"]:
+        raise LimitHit(r["result"][-300:])
+    if not staging.exists() or not any(p.is_file() for p in staging.rglob("*")):
         print(f"  ! test-writer không tạo file cho {tid}: {r['result'][:200]}")
-        return
+        return False
     dest = Path(CFG["HOLDOUT_DIR"]) / tid
     shutil.rmtree(dest, ignore_errors=True)
     dest.parent.mkdir(parents=True, exist_ok=True)
     shutil.move(str(staging), str(dest))
     print(f"  bài test ẩn → {dest}")
+    return True
+
+
+def needs_holdout(t: dict) -> bool:
+    return t.get("holdout") is True and bool(CFG.get("HOLDOUT_DIR")) and \
+        not (Path(CFG["HOLDOUT_DIR"]) / str(t["id"])).exists()
+
+
+class SkipTask(Exception):
+    """Task can't run tonight for a reason that is not the agent's fault (no attempt used)."""
 
 
 def gh_snapshot() -> dict:
@@ -891,6 +930,12 @@ def run_holdout(t, wt: Path, log: Path):
 
 def run_task(t, st, run_dir: Path) -> dict:
     tid, base = str(t["id"]), CFG["BASE_BRANCH"]
+    # Hidden tests are written here, on the machine that runs them, from the spec and
+    # the current base code — before the implementer starts, so they can't be tuned to it.
+    if needs_holdout(t):
+        print(f"  viết bài test ẩn cho {tid} ...")
+        if not write_holdout(t):
+            raise SkipTask("test-writer không viết được bài test ẩn")
     rec = st.setdefault(tid, {})
     attempt = rec.get("attempts", 0) + 1
     base_sha = git(["rev-parse", "--short", base]).stdout.strip()
@@ -1018,6 +1063,8 @@ def cmd_night(args):
     lock = STATE_DIR / "night.lock"
     if lock.exists() and age_hours(dt.datetime.fromtimestamp(lock.stat().st_mtime, dt.timezone.utc).isoformat()) < float(CFG["LOCK_HOURS"]):
         sys.exit("Đang có một lượt chạy khác trên máy này (night.lock).")
+    if not claude_available():
+        sys.exit(NO_CLAUDE_MSG.format(bin=CFG["CLAUDE_BIN"]))
     lock.write_text(str(os.getpid()))
     remote_locked = False
     try:
@@ -1053,6 +1100,11 @@ def cmd_night(args):
             except LimitHit as e:
                 stopped = f"Dừng sớm: chạm giới hạn gói ({e})"
                 break
+            except SkipTask as e:
+                rec = st.setdefault(str(t["id"]), {})
+                set_status(t, st, "queued", note=f"bỏ qua đêm nay: {e}")
+                results.append({"id": str(t["id"]), "passed": False, "reasons": [f"bỏ qua (không tính lượt thử): {e}"],
+                                "pr": "", "cost": 0})
             except Exception as e:
                 set_status(t, st, "queued", last_fail=f"- lỗi runner: {e}")
                 results.append({"id": str(t["id"]), "passed": False, "reasons": [f"lỗi runner: {e}"], "pr": "", "cost": 0})
@@ -1100,7 +1152,10 @@ def main():
     sub.add_parser("import").set_defaults(fn=cmd_import)
     p = sub.add_parser("set"); p.add_argument("id"); p.add_argument("status"); p.set_defaults(fn=cmd_set)
     a = ap.parse_args()
-    a.fn(a)
+    try:
+        a.fn(a)
+    except NoClaude as e:
+        sys.exit(str(e))
 
 
 if __name__ == "__main__":

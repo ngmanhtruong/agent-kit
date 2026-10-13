@@ -75,9 +75,10 @@ def main() -> None:
     print(f"✓ Đã cài agent-kit vào {repo}")
     for n in notes:
         print("  -", n)
-    for tool in ("python3", "git", "claude", "gh"):
+    for tool, why in (("python3", ""), ("git", ""), ("gh", " (chỉ cần nếu GH_SYNC=1)"),
+                      ("claude", " (chỉ cần trên máy chạy `kit.py night`; máy chỉ có Copilot vẫn dùng được approve/status/report/doctor)")):
         if not shutil.which(tool):
-            print(f"  ! thiếu `{tool}` trên máy này")
+            print(f"  ! thiếu `{tool}` trên máy này{why}")
     v = subprocess.run(["claude", "--version"], capture_output=True, text=True) if shutil.which("claude") else None
     if v:
         print(f"  claude: {v.stdout.strip()} (cần bản hỗ trợ hook onFailure và --permission-prompts)")
