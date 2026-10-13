@@ -31,6 +31,7 @@ Quyền ghi được hook ép theo tên agent (`.claude/hooks/_common.py` → `R
 | "Chấm lại nhánh X" | `reviewer` |
 | "Viết test ẩn cho task Y" | `test-writer` (thường do `kit.py approve` tự gọi) |
 | "Làm task" / "chạy hàng đợi" / "work" | Chạy `python3 runner/kit.py work` (thêm `--task ID` nếu người dùng chỉ định). Nếu nó in **BƯỚC TIẾP THEO** (chế độ chat): làm đúng bước đó rồi chạy lại `work`, lặp tới khi xong. Không spawn hàng loạt |
+| "Không biết làm gì tiếp" / "bắt đầu thế nào" / người dùng chưa nói rõ muốn gì | Chạy `python3 runner/kit.py menu --json` (chỉ đọc, không gọi AI). Đưa các lựa chọn có `available: true` cho người dùng chọn bằng giao diện lựa chọn của bạn (nêu tình hình `summary`, đánh dấu mục `recommended`; mục `choices` là lựa chọn con như từng task nháp cần duyệt). Rồi chạy đúng `command` của lựa chọn. Mục `ai: true` tốn token: nói rõ và hỏi xác nhận trước; mục duyệt (`approve`): để người dùng đọc file trước, không duyệt thay |
 | "Tình hình thế nào?" / "Đêm qua làm được gì?" | Tự chạy `python3 runner/kit.py status` và `report` (chỉ đọc), tóm tắt cho người dùng |
 | "Vì sao task X fail?" | Chạy `python3 runner/kit.py report --task X`, tóm tắt lý do; đề xuất sửa task hoặc `set X queued` |
 | "Kiểm tra hệ thống" | Chạy `python3 runner/kit.py doctor`, giải thích từng ✗/! và cách xử lý. Chỉ chạy `doctor --fix` khi người dùng đồng ý |

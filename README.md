@@ -396,6 +396,8 @@ Tối thiểu cần chỉnh: `BASE_BRANCH`, `CLAUDE_BIN`, `HOLDOUT_DIR`, `HOLDOU
 
 ## 6. Quy trình hằng ngày
 
+> **Không nhớ lệnh nào? Chạy một lệnh duy nhất:** `python3 runner/kit.py` (không tham số). Nó hiện tình hình hiện tại (bao nhiêu task nháp, sẵn sàng, chờ review, failed...), gợi ý việc nên làm, rồi cho bạn chọn số: làm việc, xem tình hình, xem lại các phiên trước, kiểm tra hệ thống, xem Issue GitHub tự mở, duyệt nháp, bắt đầu tính năng mới, xem độ phủ yêu cầu, đồng bộ / chạy lại task failed. Mỗi lựa chọn in ra lệnh tương đương để lần sau bạn gõ thẳng. **Có hai cách dùng:** (1) bảo AI agent (Claude Code, Copilot Chat...) "bắt đầu với agent-kit" — agent chạy `kit.py menu --json`, hỏi bạn các lựa chọn bằng giao diện của nó rồi chạy lệnh thay bạn; (2) tự chạy `kit.py` trong terminal. Hai cách dùng chung một danh sách lựa chọn. Mục gọi AI được đánh dấu `[gọi AI]` và hỏi xác nhận trước khi tốn token. Các bước bên dưới là cách làm bằng lệnh cụ thể cho ai đã quen.
+
 ### Bước 0 — (Tuỳ chọn) Ý tưởng → PRD
 
 ```bash
@@ -528,6 +530,8 @@ Mọi máy ngang hàng, làm được mọi lệnh, với agent nào cũng đư�
 ## 7. Lệnh `kit.py`
 
 Chạy từ thư mục gốc project: `python3 runner/kit.py <lệnh>`
+
+**Menu:** `python3 runner/kit.py` (hoặc `kit.py menu`) — chọn việc bằng số, không cần nhớ lệnh. `menu --json` in tình hình và các lựa chọn dạng JSON cho AI agent: mỗi lựa chọn có `command` thật, `ai` (có tốn token không), `available`, `why`, và `choices` (lựa chọn con, ví dụ từng task nháp cần duyệt). Chạy không có terminal thì chỉ in menu rồi thoát, không chờ nhập. Menu chỉ gọi lại các lệnh bên dưới; chỉ mục 1 (`work`) và mục 7 (`idea`/`plan`) gọi AI, và hỏi trước.
 
 **Lệnh kiểm tra — chỉ đọc, an toàn mọi lúc, mọi máy:**
 
@@ -697,6 +701,7 @@ Chạy lại `install.py` vào repo mới, điền 4 file ở mục 5. Mọi th�
 - **Bạn đang nói chuyện trực tiếp với người dùng** (không phải agent con, không chạy từ runner) → bạn là **agent chủ**. Làm theo `docs/orchestration.md`: chọn đúng agent con, đưa đủ đầu vào, kiểm tra đầu ra, báo lại người dùng.
 - **Bạn được spawn theo một file trong `.claude/agents/`** → làm đúng file đó, không làm việc của agent khác.
 - **Bạn được runner gọi** → vai trò nằm trong biến `AGENT_KIT_ROLE` (hoặc được nêu đầu prompt).
+- **Người dùng chưa nói rõ muốn làm gì, hoặc bảo "bắt đầu"** → chạy `python3 runner/kit.py menu --json`, đưa các lựa chọn khả dụng cho người dùng chọn (dùng công cụ hỏi/chọn của bạn), rồi chạy đúng lệnh họ chọn. Hỏi xác nhận trước mục `ai: true`; không tự `approve` thay người dùng.
 - **Bạn là chat agent và người dùng bảo làm task / chạy work** → chạy `python3 runner/kit.py work` trong terminal, đọc khối **BƯỚC TIẾP THEO** nó in ra, làm đúng bước đó (đóng đúng vai được nêu), rồi chạy lại `work`. Lặp tới khi nó báo task đã chấm xong. Không tự sửa file trong `.agent-kit/` ngoài file mà bước đó yêu cầu.
 
 | Agent / vai trò | Việc của bạn | File hướng dẫn |

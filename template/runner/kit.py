@@ -8,6 +8,9 @@ Agent (đặt AGENT trong runner/config.env, mặc định auto):
           `kit.py work`, làm bước nó in ra, rồi chạy lại cho tới khi xong
   auto    claude nếu có → cli nếu có AGENT_CMD → chat
 
+Không nhớ lệnh? Chạy `python3 runner/kit.py` (không tham số): hiện menu, chọn số.
+  AI agent: `python3 runner/kit.py menu --json` → lựa chọn + lệnh cụ thể để hỏi người dùng.
+
 Kiểm tra (chỉ đọc — an toàn chạy trên bất kỳ máy nào, bất kỳ lúc nào):
   python3 runner/kit.py status [--offline]       bảng trạng thái mọi task, gộp từ mọi máy
   python3 runner/kit.py report [--last N]        tóm tắt các phiên gần nhất (mọi máy)
@@ -1685,12 +1688,333 @@ def cmd_work(args):
     return work_batch(args)
 
 
+# ───────────────────────── menu (một lệnh cho mọi việc) ─────────────────────────
+def task_title(t: dict) -> str:
+    m = re.search(r"# Mục tiêu\s*\n+(.+)", t.get("_body", ""))
+    return (m.group(1).strip() if m else "")[:70]
+
+
+def design_features() -> list:
+    d = ROOT / "design"
+    return sorted(p for p in d.iterdir() if p.is_dir() and not p.name.startswith("_")) if d.is_dir() else []
+
+
+def menu_ask(prompt: str, default: str = "") -> str:
+    try:
+        return input(prompt).strip() or default
+    except EOFError:
+        raise SystemExit(0)
+
+
+def menu_yes(prompt: str, default: bool = False) -> bool:
+    a = menu_ask(f"{prompt} [{'Y/n' if default else 'y/N'}] ").lower()
+    return default if not a else a in ("y", "yes", "c", "có")
+
+
+def menu_run(cmdline: str, fn, **kw):
+    """Chạy một lệnh kit và in lệnh tương đương, để lần sau gõ thẳng."""
+    print(f"\n$ python3 runner/kit.py {cmdline}\n")
+    try:
+        fn(argparse.Namespace(**kw))
+    except NeedsChat:
+        print("Lệnh này cần agent CLI; máy này đang ở chế độ chat.")
+    except SystemExit as e:
+        if e.code not in (None, 0):
+            print(e.code if isinstance(e.code, str) else f"(kết thúc với mã {e.code})")
+
+
+def feature_next(d: Path) -> dict:
+    """Bước tiếp theo của một thư mục design/<feature> (chỉ đọc)."""
+    rel = f"design/{d.name}"
+    prd = load_prd(d) if d.is_dir() else None
+    others = [p for p in d.iterdir() if p.is_file() and p.name != "prd.md"] if d.is_dir() else []
+    planned = (TASKS / d.name).is_dir()
+    if planned:
+        return dict(feature=d.name, state="planned", command=f"trace {rel}", ai=False,
+                    note="đã chia task: duyệt task nháp (mục 6) hoặc xem độ phủ yêu cầu")
+    if prd and prd["status"] == "approved":
+        return dict(feature=d.name, state="prd_approved", command=f"plan {rel}", ai=True,
+                    note="PRD đã duyệt → chia epic/task nháp")
+    if prd:
+        return dict(feature=d.name, state="prd_draft", command=f"approve {rel}", ai=False,
+                    note=f"đọc {rel}/prd.md (trả lời Câu hỏi mở, sửa yêu cầu) rồi mới duyệt")
+    if others:
+        return dict(feature=d.name, state="has_idea_or_spec", command=f"idea {rel}", ai=True,
+                    note=f"viết PRD từ ý tưởng; hoặc bỏ qua PRD: `plan {rel}` (AI) nếu đã có spec.md")
+    return dict(feature=d.name, state="empty", command=None, ai=False,
+                note=f"viết ý tưởng vào {rel}/idea.md (mẫu: design/_IDEA_TEMPLATE.md) rồi chạy lại")
+
+
+def menu_state() -> dict:
+    """Tình hình hiện tại + các lựa chọn khả dụng. Chỉ đọc, không gọi AI. Dùng chung cho menu và --json."""
+    tasks = load_tasks()
+    st, _, _ = view_state()
+    c = {}
+    by = {}
+    for t in tasks.values():
+        s = status_of(t, st)
+        c[s] = c.get(s, 0) + 1
+        by.setdefault(s, []).append(t)
+    sess, lock = load_session(), remote_lock()
+    notes = []
+    qn = len([t for t in by.get("queued", []) if t["type"] != "epic"])
+    for key, text in [("draft", "task nháp chờ bạn duyệt"), ("queued", "task sẵn sàng làm"),
+                      ("review", "PR chờ bạn review/merge"), ("verify", "epic chờ kiểm thử"),
+                      ("failed", "task failed cần xem"), ("running", "task đang chạy")]:
+        n = qn if key == "queued" else c.get(key, 0)
+        if n:
+            notes.append(f"{n} {text}")
+    if sess:
+        notes.insert(0, f"phiên chat đang mở: {sess.get('task')} ({sess.get('stage')})")
+    if lock:
+        notes.append(f"🔒 {lock.get('host')} đang chạy `work`")
+    drafts = [dict(target=str(t["id"]), type=t["type"], epic=str(t.get("epic", "")), title=task_title(t))
+              for t in sorted(by.get("draft", []), key=lambda x: (str(x.get("epic", "")), str(x["id"])))]
+    for d in design_features():
+        prd = load_prd(d)
+        if prd and prd["status"] == "draft":
+            drafts.insert(0, dict(target=f"design/{d.name}", type="prd", epic="", title=f"PRD {d.name}: {len(prd['reqs'])} yêu cầu"))
+    failed = [dict(id=str(t["id"]), why=((st.get(str(t["id"]), {}).get("last_fail") or "").strip().splitlines() or ["-"])[0])
+              for t in by.get("failed", [])]
+    feats = [feature_next(d) for d in design_features()]
+    ready = [str(t["id"]) for t in by.get("queued", []) if t["type"] != "epic"] + \
+            [str(t["id"]) for t in by.get("verify", [])]
+
+    opts = {}
+
+    def add(key, label, command, ai=False, available=True, why="", choices=None, ask=None):
+        o = dict(key=key, label=label, command=command, ai=ai, available=available, why=why)
+        if choices is not None:
+            o["choices"] = choices
+        if ask:
+            o["ask"] = ask
+        opts[key] = o
+
+    add("1", "Bắt đầu làm việc (work)", "work", ai=True, available=bool(sess or ready),
+        why=(f"đang có phiên chat mở ở {sess.get('task')}: `work` để tiếp tục, `work --abort` để huỷ" if sess
+             else f"{len(ready)} việc sẵn sàng: {', '.join(ready[:6])}" if ready else "chưa có task nào sẵn sàng"),
+        ask="tuỳ chọn: `--task <ID>` để làm đúng một task; mặc định làm mọi task sẵn sàng")
+    add("2", "Xem tình hình mọi task", "status")
+    add("3", "Xem lại các phiên trước (làm được gì, vì sao fail)", "report",
+        ask="tuỳ chọn: `report --task <ID>` để xem chi tiết một task")
+    add("4", "Kiểm tra hệ thống (doctor)", "doctor", why="chỉ chạy `doctor --fix` khi người dùng đồng ý")
+    add("5", "Xem Issue GitHub tự động mở / nhập Issue thành task", "import", available=flag("GH_SYNC"),
+        why="liệt kê trước: `gh issue list --label agent-ready --state open`; `import` chỉ tạo task nháp"
+            if flag("GH_SYNC") else "GH_SYNC=0")
+    add("6", "Duyệt PRD / task nháp", "approve <target>", available=bool(drafts),
+        why="duyệt là cho phép agent làm: để người dùng đọc file trước" if drafts else "không có gì nháp",
+        choices=[dict(target=d["target"], label=f"{d['type']} {d['title']}", command=f"approve {d['target']}") for d in drafts])
+    add("7", "Bắt đầu tính năng mới (ý tưởng → PRD → chia task)", "idea|approve|plan design/<feature>", ai=True,
+        choices=[dict(feature=f["feature"], state=f["state"], command=f["command"], ai=f["ai"], note=f["note"]) for f in feats],
+        ask="tính năng mới: hỏi tên (slug), `mkdir -p design/<tên> && cp design/_IDEA_TEMPLATE.md design/<tên>/idea.md`, "
+            "để người dùng viết ý tưởng, rồi `idea design/<tên>`")
+    add("8", "Yêu cầu nào đã xong? (trace)", "trace")
+    add("9", "Đồng bộ trạng thái, cho task failed chạy lại", "sync",
+        why=f"{len(failed)} task failed: `set <ID> queued` để chạy lại" if failed else "",
+        choices=[dict(id=f["id"], why=f["why"], command=f"set {f['id']} queued") for f in failed])
+
+    rec = "7" if not tasks else None
+    for key, cond in [("1", sess or ready), ("6", drafts), ("9", c.get("review")), ("3", failed)]:
+        if cond and opts[key]["available"]:
+            rec = key
+            break
+    return dict(project=ROOT.name, machine=HOST, agent=agent_mode(),
+                summary=" · ".join(notes) if tasks else "chưa có task nào",
+                counts=c, recommended=rec or "2", options=[o for o in opts.values()])
+
+
+def menu_work():
+    sess = load_session()
+    if sess:
+        a = menu_ask(f"Đang có phiên chat ở task {sess.get('task')}. [Enter] tiếp tục · [a] huỷ phiên: ").lower()
+        if a == "a":
+            return menu_run("work --abort", cmd_work, max=0, task=None, abort=True)
+        return menu_run("work", cmd_work, max=0, task=None, abort=False)
+    tid = menu_ask("Task cụ thể (ID) hay Enter để làm mọi task sẵn sàng: ")
+    if agent_mode() != "chat" and not menu_yes("Việc này gọi AI (tốn token). Tiếp tục?", True):
+        return
+    menu_run("work" + (f" --task {tid}" if tid else ""), cmd_work, max=0, task=tid or None, abort=False)
+
+
+def menu_report():
+    tid = menu_ask("ID task muốn xem chi tiết, hoặc Enter để xem tóm tắt các phiên gần nhất: ")
+    menu_run("report" + (f" --task {tid}" if tid else ""), cmd_report, last=0, task=tid or None)
+
+
+def menu_doctor():
+    menu_run("doctor", cmd_doctor, fix=False)
+    if menu_yes("\nSửa các lỗi an toàn (task kẹt 'running', sync)?"):
+        menu_run("doctor --fix", cmd_doctor, fix=True)
+
+
+def menu_issues():
+    if not flag("GH_SYNC"):
+        print("GitHub đang tắt (GH_SYNC=0 trong runner/config.env) nên không có Issue tự động.")
+        return
+    r = gh(["issue", "list", "--label", "agent-ready", "--state", "open", "--limit", "50",
+            "--json", "number,title,labels"], check=False)
+    try:
+        items = json.loads(r.stdout or "[]")
+    except ValueError:
+        items = []
+    if not items:
+        print("Không có Issue nào nhãn 'agent-ready' đang mở.")
+        return
+    known = {str(t.get("issue")) for t in load_tasks().values()}
+    new = 0
+    print("Issue nhãn agent-ready đang mở (bug epic FAIL cũng nằm ở đây):")
+    for i in items:
+        mark = "đã là task" if str(i["number"]) in known else "CHƯA nhập"
+        new += mark == "CHƯA nhập"
+        kind = "bug" if any(l["name"] == "bug" for l in i["labels"]) else "task"
+        print(f"  #{i['number']:<5} [{kind}] {i['title'][:70]}  ({mark})")
+    if new and menu_yes(f"\nNhập {new} Issue chưa có thành task nháp (không gọi AI)?"):
+        menu_run("import", cmd_import)
+        print("\nMở các file trong tasks/imported/, thêm mục '# Acceptance', rồi chọn mục 6 để duyệt.")
+
+
+def menu_approve():
+    tasks = load_tasks()
+    opts = []
+    for d in design_features():
+        prd = load_prd(d)
+        if prd and prd["status"] == "draft":
+            opts.append((f"design/{d.name}", f"PRD {d.name}: {len(prd['reqs'])} yêu cầu"))
+    for t in sorted(tasks.values(), key=lambda x: (str(x.get("epic", "")), str(x["id"]))):
+        if t.get("status") == "draft":
+            opts.append((str(t["id"]), f"{t['type']:<5} epic {t.get('epic', '-')}: {task_title(t)}"))
+    if not opts:
+        print("Không có PRD hay task nháp nào chờ duyệt.")
+        return
+    print("Đang chờ bạn duyệt (đọc kỹ file trước — duyệt là cho phép agent làm):")
+    for n, (_, label) in enumerate(opts, 1):
+        print(f"  {n}. {label}")
+    a = menu_ask("Số muốn duyệt · [a] duyệt hết task nháp · Enter huỷ: ").lower()
+    if a == "a":
+        menu_run("approve all", cmd_approve, target="all")
+    elif a.isdigit() and 1 <= int(a) <= len(opts):
+        menu_run(f"approve {opts[int(a) - 1][0]}", cmd_approve, target=opts[int(a) - 1][0])
+
+
+def menu_feature():
+    feats = design_features()
+    print("Tính năng/design hiện có:" if feats else "Chưa có design nào.")
+    for n, d in enumerate(feats, 1):
+        prd = load_prd(d)
+        print(f"  {n}. {d.name}  ({'PRD ' + prd['status'] if prd else 'chưa có PRD'}"
+              f"{', đã có task' if (TASKS / d.name).is_dir() else ''})")
+    a = menu_ask("Số để tiếp tục tính năng đó · hoặc gõ tên mới (vd: gio-hang) · Enter huỷ: ")
+    if not a:
+        return
+    if a.isdigit() and 1 <= int(a) <= len(feats):
+        d = feats[int(a) - 1]
+    else:
+        name = re.sub(r"[^a-z0-9_-]+", "-", a.lower()).strip("-")
+        if not name:
+            print("Tên không hợp lệ.")
+            return
+        d = ROOT / "design" / name
+    rel = f"design/{d.name}"
+    prd = load_prd(d) if d.is_dir() else None
+    others = [p for p in d.iterdir() if p.is_file() and p.name not in ("prd.md",)] if d.is_dir() else []
+    if not others and not prd:
+        d.mkdir(parents=True, exist_ok=True)
+        tpl = ROOT / "design" / "_IDEA_TEMPLATE.md"
+        (d / "idea.md").write_text(tpl.read_text() if tpl.exists() else "# Ý tưởng\n\n")
+        print(f"✓ Đã tạo {rel}/idea.md. Viết ý tưởng vào đó (hoặc `spec.md` nếu muốn bỏ qua PRD), "
+              f"rồi chạy lại mục này.")
+    elif not prd:
+        mode = menu_ask("[i] viết PRD từ ý tưởng (gọi AI) · [p] chia task luôn từ spec/design (gọi AI) · Enter huỷ: ").lower()
+        if mode == "i":
+            menu_run(f"idea {rel}", cmd_idea, design_dir=rel)
+        elif mode == "p":
+            menu_run(f"plan {rel}", cmd_plan, design_dir=rel)
+    elif prd["status"] == "draft":
+        print(f"PRD {rel}/prd.md đang nháp ({len(prd['reqs'])} yêu cầu). Đọc, trả lời 'Câu hỏi mở', sửa cho đúng ý.")
+        if menu_yes("Đã đọc xong, duyệt PRD ngay?"):
+            menu_run(f"approve {rel}", cmd_approve, target=rel)
+    elif (TASKS / d.name).is_dir():
+        print(f"{rel} đã được chia task. Xem mục 8 (kiểm tra độ phủ) hoặc 6 (duyệt task nháp).")
+    elif menu_yes(f"PRD đã duyệt. Chia {rel} thành epic/task nháp (gọi AI, tốn token)?", True):
+        menu_run(f"plan {rel}", cmd_plan, design_dir=rel)
+
+
+def menu_trace():
+    menu_run("trace", cmd_trace, design_dir=None, offline=False)
+
+
+def menu_sync():
+    menu_run("sync", cmd_sync)
+    st, _, _ = view_state(fetch=False)
+    failed = [t for t in load_tasks().values() if status_of(t, st) == "failed"]
+    if not failed:
+        return
+    print("\nTask failed:")
+    for n, t in enumerate(failed, 1):
+        why = (st.get(str(t["id"]), {}).get("last_fail") or "").strip().splitlines()
+        print(f"  {n}. {t['id']}: {why[0] if why else '-'}")
+    a = menu_ask("Số task muốn cho chạy lại (về queued) · Enter bỏ qua: ")
+    if a.isdigit() and 1 <= int(a) <= len(failed):
+        tid = str(failed[int(a) - 1]["id"])
+        menu_run(f"set {tid} queued", cmd_set, id=tid, status="queued")
+
+
+MENU = [
+    ("1", "Bắt đầu làm việc (work)", "AI", menu_work),
+    ("2", "Xem tình hình mọi task", "", lambda: menu_run("status", cmd_status, offline=False)),
+    ("3", "Xem lại các phiên trước (làm được gì, vì sao fail)", "", menu_report),
+    ("4", "Kiểm tra hệ thống (doctor)", "", menu_doctor),
+    ("5", "Xem Issue GitHub tự động mở / nhập Issue thành task", "", menu_issues),
+    ("6", "Duyệt PRD / task nháp", "", menu_approve),
+    ("7", "Bắt đầu tính năng mới (ý tưởng → PRD → chia task)", "AI", menu_feature),
+    ("8", "Yêu cầu nào đã xong? (trace)", "", menu_trace),
+    ("9", "Đồng bộ trạng thái, cho task failed chạy lại", "", menu_sync),
+]
+
+
+def menu_show(m: dict):
+    print(f"\nagent-kit · {m['project']} · {m['machine']} · agent: {m['agent']}\nHiện tại: {m['summary']}\n")
+    for o in m["options"]:
+        if o["available"]:
+            print(f"  {o['key']}. {o['label']}" + ("  [gọi AI]" if o["ai"] else "")
+                  + ("   ← gợi ý" if o["key"] == m["recommended"] else ""))
+    print("  0. Thoát")
+
+
+def cmd_menu(args=None):
+    m = menu_state()
+    if getattr(args, "json", False):
+        print(json.dumps(m, ensure_ascii=False, indent=2))
+        return
+    menu_show(m)
+    if not sys.stdin.isatty():
+        print("\nKhông có terminal để chọn. Nếu bạn là AI agent: đưa các lựa chọn trên cho người dùng chọn "
+              "(`python3 runner/kit.py menu --json` có lệnh cụ thể và lựa chọn con), rồi chạy đúng lệnh họ chọn.")
+        return
+    actions = {k: fn for k, _, _, fn in MENU}
+    while True:
+        avail = {o["key"] for o in m["options"] if o["available"]}
+        a = menu_ask("\nChọn số (Enter = gợi ý): ", m["recommended"])
+        if a in ("0", "q", "quit", "exit"):
+            return
+        if a not in actions or a not in avail:
+            print("Không có lựa chọn đó." if a not in actions else "Mục này chưa có việc để làm.")
+            continue
+        actions[a]()
+        menu_ask("\n[Enter] quay lại menu ")
+        m = menu_state()
+        menu_show(m)
+
+
 def main():
     if hasattr(__import__("signal"), "SIGPIPE"):  # quiet exit when piped into head/less
         import signal
         signal.signal(signal.SIGPIPE, signal.SIG_DFL)
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    sub = ap.add_subparsers(dest="cmd", required=True)
+    ap.set_defaults(fn=cmd_menu)
+    sub = ap.add_subparsers(dest="cmd")
+    p = sub.add_parser("menu", help="menu chọn việc (chạy không tham số cũng ra menu)")
+    p.add_argument("--json", action="store_true", help="in tình hình + lựa chọn dạng JSON (cho AI agent)"); p.set_defaults(fn=cmd_menu)
     p = sub.add_parser("status"); p.add_argument("--offline", action="store_true"); p.set_defaults(fn=cmd_status)
     p = sub.add_parser("report"); p.add_argument("--last", type=int, default=0)
     p.add_argument("--task"); p.set_defaults(fn=cmd_report)

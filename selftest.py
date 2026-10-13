@@ -668,6 +668,17 @@ class Offline:
         self.check("SHOP-01" in out and " A " in out, "máy B thấy task do máy A làm")
         kit(b, "report")
         kit(b, "doctor")
+        r = sh([PY, "runner/kit.py"], b, check=False)
+        self.check(r.returncode == 0 and "Hiện tại:" in r.stdout and "0. Thoát" in r.stdout,
+                   "kit.py không tham số: in menu rồi thoát (không terminal → không chờ nhập)")
+        r = sh([PY, "runner/kit.py", "menu", "--json"], b, check=False)
+        try:
+            m = json.loads(r.stdout)
+            ok = bool(m["options"]) and all("command" in o and "available" in o and "ai" in o for o in m["options"]) \
+                and any(o["key"] == "1" and o["ai"] for o in m["options"])
+        except Exception:
+            ok = False
+        self.check(ok, "kit.py menu --json: JSON hợp lệ, mỗi lựa chọn có command / available / ai")
         after = sh(["git", "status", "--porcelain"], b).stdout
         self.check(before == after, "status / report / doctor không sửa gì trên máy B")
         sh(["git", "pull", "-q"], b)
