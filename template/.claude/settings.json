@@ -28,7 +28,9 @@
           {
             "type": "command",
             "command": "python3",
-            "args": ["${CLAUDE_PROJECT_DIR}/.claude/hooks/guard_bash.py"],
+            "args": [
+              "${CLAUDE_PROJECT_DIR}/.claude/hooks/guard_bash.py"
+            ],
             "onFailure": "block"
           }
         ]
@@ -39,7 +41,9 @@
           {
             "type": "command",
             "command": "python3",
-            "args": ["${CLAUDE_PROJECT_DIR}/.claude/hooks/guard_files.py"],
+            "args": [
+              "${CLAUDE_PROJECT_DIR}/.claude/hooks/guard_files.py"
+            ],
             "onFailure": "block"
           }
         ]
@@ -51,7 +55,23 @@
           {
             "type": "command",
             "command": "python3",
-            "args": ["${CLAUDE_PROJECT_DIR}/.claude/hooks/stop_checks.py"],
+            "args": [
+              "${CLAUDE_PROJECT_DIR}/.claude/hooks/stop_checks.py"
+            ],
+            "timeout": 900
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3",
+            "args": [
+              "${CLAUDE_PROJECT_DIR}/.claude/hooks/stop_checks.py"
+            ],
             "timeout": 900
           }
         ]

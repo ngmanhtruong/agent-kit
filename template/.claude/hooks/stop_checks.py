@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Self-grading gate: when a worker tries to stop after changing code, run
+"""Self-grading gate (Stop and SubagentStop): when a worker/implementer tries to stop after changing code, run
 eval/checks.sh. If it fails, block the stop and feed the errors back.
 Gives up after MAX_ATTEMPTS so a stuck agent doesn't burn the whole quota."""
 import json
@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from _common import PROJECT, ROLE, log, read_input  # noqa: E402
+from _common import PROJECT, is_protected, log, read_input, role_of  # noqa: E402
 
 MAX_ATTEMPTS = int(os.environ.get("AGENT_KIT_MAX_FIX_ATTEMPTS", "3"))
 CHECKS = PROJECT / "eval" / "checks.sh"
@@ -17,7 +17,7 @@ CHECKS = PROJECT / "eval" / "checks.sh"
 data = read_input()
 session = data.get("session_id", "unknown")
 
-if ROLE != "worker" or os.environ.get("AGENT_KIT_SKIP_STOP_CHECK") == "1" or not CHECKS.exists():
+if role_of(data) != "worker" or os.environ.get("AGENT_KIT_SKIP_STOP_CHECK") == "1" or not CHECKS.exists():
     sys.exit(0)
 
 
@@ -29,12 +29,16 @@ def git(*args: str) -> str:
         return ""
 
 
-# Only grade when something changed: uncommitted edits, or commits ahead of base.
+# Only grade when CODE changed: uncommitted edits, or commits ahead of base.
+# Changes limited to protected/spec areas (tasks/, docs/, design/, ...) — e.g. after
+# a planner or bug-triager subagent ran — don't trigger grading.
 base = os.environ.get("AGENT_KIT_BASE", "")
-changed = bool(git("status", "--porcelain"))
-if not changed and base:
-    changed = git("rev-list", "--count", f"{base}..HEAD") not in ("", "0")
-if not changed:
+paths = (git("diff", "--name-only", "HEAD").splitlines()
+         + git("ls-files", "--others", "--exclude-standard").splitlines())
+if base:
+    paths += git("diff", "--name-only", f"{base}...HEAD").splitlines()
+code_changed = [p for p in paths if p and not is_protected(p) and not p.startswith(".agent-kit/")]
+if not code_changed:
     sys.exit(0)
 
 state = PROJECT / ".agent-kit" / "state"

@@ -6,15 +6,31 @@ from pathlib import Path
 
 PROJECT = Path(os.environ.get("CLAUDE_PROJECT_DIR", os.getcwd())).resolve()
 
-# Who is running: worker (default), planner, test-writer, reviewer. Set by runner/kit.py.
+# Who is running. Runner sets AGENT_KIT_ROLE; when a main agent spawns a
+# subagent interactively, the hook input carries agent_type instead (see role_of).
 ROLE = os.environ.get("AGENT_KIT_ROLE", "worker")
 
 # Roles that may ONLY write inside these prefixes. Everything else is denied.
 ROLE_WRITE_ONLY = {
     "planner": ["tasks/"],
+    "bug-triager": ["tasks/bugs/"],
     "test-writer": [".agent-kit/holdout-staging/"],
+    "context-writer": [".agent-kit/proposals/"],
     "reviewer": [],
 }
+
+# Agent names that behave as a worker (default rules, graded on stop).
+WORKER_AGENTS = {"implementer", "worker"}
+
+
+def role_of(data: dict) -> str:
+    """Subagent type from the hook input wins over the env role."""
+    agent = (data or {}).get("agent_type") or ""
+    if agent in ROLE_WRITE_ONLY:
+        return agent
+    if agent in WORKER_AGENTS:
+        return "worker"
+    return ROLE
 
 # Paths a worker must never change. The human edits these, not the AI.
 PROTECTED = [
@@ -75,12 +91,12 @@ def deny(reason: str) -> None:
     sys.exit(0)
 
 
-def log(event: str, detail: str) -> None:
+def log(event: str, detail: str, role: str = "") -> None:
     """Append guard events so the morning report can show what was blocked."""
     d = PROJECT / ".agent-kit" / "logs"
     try:
         d.mkdir(parents=True, exist_ok=True)
         with open(d / "guard.log", "a") as f:
-            f.write(f"{ROLE}\t{event}\t{detail}\n")
+            f.write(f"{role or ROLE}\t{event}\t{detail}\n")
     except Exception:
         pass

@@ -27,3 +27,7 @@ Hook sẽ tự chặn nếu bạn dừng khi checks chưa pass. Đừng lách. B
 
 ## 6. Khi không chắc
 Không đoán ý người dùng. Chọn cách an toàn nhất, ghi giả định vào báo cáo.
+
+## 7. Nạp sẵn (không xoá)
+@docs/architecture.md
+@docs/orchestration.md

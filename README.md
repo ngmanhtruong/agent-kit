@@ -66,16 +66,20 @@ Các nguyên tắc đi kèm:
                                      6. Báo cáo → file + Telegram
 ```
 
-### 2.2 Bốn vai trò agent
+### 2.2 Agent chủ và sáu agent con
 
-| Vai trò | Khi nào chạy | Được ghi vào đâu | File định nghĩa |
+Mỗi công việc có một file hướng dẫn riêng trong `.claude/agents/<tên>.md`. **Agent chủ** (phiên Claude Code bạn đang nói chuyện) đọc `docs/orchestration.md` (được nạp sẵn qua `CLAUDE.md`) để biết khi nào spawn agent con nào, đưa đầu vào gì, kiểm tra đầu ra thế nào.
+
+| Agent con | Công việc | Ai gọi | Được ghi vào đâu |
 |---|---|---|---|
-| **planner** | `kit.py plan` | chỉ `tasks/` | `.claude/agents/planner.md` |
-| **test-writer** | `kit.py approve` (task có `holdout: true`) | chỉ `.agent-kit/holdout-staging/` | `.claude/agents/test-writer.md` |
-| **worker** | `kit.py night` | mọi nơi **trừ** vùng bảo vệ | (mặc định, theo `CLAUDE.md`) |
-| **reviewer** | `kit.py night`, sau worker | không ghi gì | `.claude/agents/reviewer.md` |
+| **context-writer** | Quét codebase → đề xuất `CLAUDE.md`, `architecture.md`, `checks.sh` | Agent chủ | chỉ `.agent-kit/proposals/` |
+| **planner** | Design → epic + tasks nháp | Agent chủ hoặc `kit.py plan` | chỉ `tasks/` |
+| **bug-triager** | Bug report → task bug nháp có bước tái hiện | Agent chủ | chỉ `tasks/bugs/` |
+| **test-writer** | Task → bài test ẩn | `kit.py approve` hoặc agent chủ | chỉ `.agent-kit/holdout-staging/` |
+| **implementer** | Làm một task đã duyệt | `kit.py night` hoặc agent chủ | mọi nơi **trừ** vùng bảo vệ |
+| **reviewer** | Chấm độc lập → JSON PASS/FAIL | `kit.py night` hoặc agent chủ | không ghi gì |
 
-Vai trò được truyền qua biến môi trường `AGENT_KIT_ROLE`, hook đọc biến này để giới hạn quyền ghi.
+Quyền ghi được hook ép theo vai trò. Vai trò lấy từ tên agent con (`agent_type` trong dữ liệu hook) khi agent chủ spawn, hoặc từ biến môi trường `AGENT_KIT_ROLE` khi runner gọi. Hook chấm bài khi dừng chạy cho cả phiên chính (`Stop`) lẫn agent con (`SubagentStop`), nhưng chỉ khi có **code** thay đổi (sửa `tasks/`, `docs/`... không kích hoạt chấm).
 
 ### 2.3 Vòng đời một task
 
@@ -107,6 +111,7 @@ your-project/
 ├── CLAUDE.md                     ★ Bản đồ dự án cho AI (bạn điền)
 ├── docs/
 │   ├── architecture.md           ★ Sơ đồ các bộ phận (bạn điền)
+│   ├── orchestration.md            Hướng dẫn agent chủ: khi nào spawn agent con nào
 │   ├── conventions.md              Quy chuẩn chưa tự động hoá được (thêm dần)
 │   └── decisions/0000-template.md  Mẫu ghi quyết định kiến trúc (ADR)
 ├── design/
@@ -128,9 +133,12 @@ your-project/
 │   │   ├── guard_bash.py           Chặn lệnh shell nguy hiểm
 │   │   ├── guard_files.py          Chặn ghi file vào vùng bảo vệ / ngoài vai trò
 │   │   └── stop_checks.py          Không cho worker dừng khi checks.sh chưa pass
-│   ├── agents/
+│   ├── agents/                     Mỗi công việc một file, agent chủ spawn theo tên
+│   │   ├── context-writer.md       Codebase → đề xuất bối cảnh (CLAUDE.md, architecture, checks)
 │   │   ├── planner.md              Design → epic + tasks
+│   │   ├── bug-triager.md          Bug report → task bug nháp
 │   │   ├── test-writer.md          Task → bài test ẩn
+│   │   ├── implementer.md          Làm một task đã duyệt
 │   │   └── reviewer.md             Chấm độc lập → JSON PASS/FAIL
 │   └── skills/
 │       ├── finish-task/SKILL.md    Quy trình bắt buộc khi hoàn tất task
@@ -157,7 +165,8 @@ your-project/
 | `runner/config.env` | Người, từng máy | Số task/đêm, đường dẫn `claude`, test ẩn, GitHub, Telegram. |
 | `.claude/settings.json` | Người | Danh sách lệnh được phép/cấm và đăng ký hooks. |
 | `.claude/hooks/*.py` | Người | Rào cứng. Chạy tự động trước mỗi lệnh/ghi file và khi agent dừng. |
-| `.claude/agents/*.md` | Người | Định nghĩa tính cách, công cụ, nhiệm vụ của planner/test-writer/reviewer. |
+| `docs/orchestration.md` | Người | Sổ tay của agent chủ: bảng agent con, chọn agent theo yêu cầu, quy tắc điều phối, mẫu prompt khi spawn. Được nạp sẵn qua `CLAUDE.md`. |
+| `.claude/agents/*.md` | Người | Mỗi file là hướng dẫn cho một công việc (context-writer, planner, bug-triager, test-writer, implementer, reviewer): nhiệm vụ, công cụ, đầu vào, đầu ra. |
 | `.claude/skills/*` | Người | Quy trình chuẩn agent gọi theo tên. |
 
 ---
@@ -215,6 +224,10 @@ Trong cron PATH rất ngắn, nên đặt `CLAUDE_BIN` trong `config.env` bằng
 ---
 
 ## 5. Điền 4 file bắt buộc
+
+**Cách nhanh:** mở Claude Code trong project và nói *"dùng context-writer để đề xuất bối cảnh cho project này"*. Agent con `context-writer` quét code, chạy thử lệnh test, rồi ghi bản đề xuất `CLAUDE.md`, `architecture.md`, `checks.sh` vào `.agent-kit/proposals/`, kèm các câu hỏi cần bạn xác nhận. Bạn đọc, sửa, rồi chép vào chỗ thật (hoặc khởi động `AGENT_KIT_UNLOCK=1 claude` và nhờ agent chép). Dưới đây là cách tự điền.
+
+Mục 7 của `CLAUDE.md` (`@docs/architecture.md`, `@docs/orchestration.md`) làm Claude Code nạp luôn hai file đó vào mọi phiên. Giữ nguyên.
 
 ### 5.1 `CLAUDE.md` — bản đồ cho AI
 
@@ -361,6 +374,20 @@ python3 runner/kit.py import    # kéo về tasks/imported/GH-<số>.md (draft)
 python3 runner/kit.py approve GH-<số>
 ```
 
+### Làm việc ban ngày với agent chủ
+
+Mở `claude` trong project và nói việc cần làm. Agent chủ tự chọn agent con theo `docs/orchestration.md`:
+
+| Bạn nói | Agent chủ spawn |
+|---|---|
+| "Đề xuất bối cảnh cho project" | `context-writer` |
+| "Chia design/feat thành task" | `planner` |
+| "Có bug: <mô tả / log>" | `bug-triager` |
+| "Làm task FEAT-02" | `implementer` → `reviewer` |
+| "Chấm lại nhánh X" | `reviewer` |
+
+Agent chủ không duyệt task thay bạn, không push, không tạo PR. Những việc đó vẫn qua `kit.py`.
+
 ### Phân vai 2 máy
 
 | Máy | Làm | Không làm |
@@ -491,16 +518,19 @@ Chạy lại `install.py` vào repo mới, điền 4 file ở mục 5. Mọi th�
 
 ### 10.1 Xác định vai trò của bạn
 
-Đọc biến môi trường `AGENT_KIT_ROLE`:
+- **Bạn đang nói chuyện trực tiếp với người dùng** (không phải agent con, không chạy từ runner) → bạn là **agent chủ**. Làm theo `docs/orchestration.md`: chọn đúng agent con, đưa đủ đầu vào, kiểm tra đầu ra, báo lại người dùng.
+- **Bạn được spawn theo một file trong `.claude/agents/`** → làm đúng file đó, không làm việc của agent khác.
+- **Bạn được runner gọi** → vai trò nằm trong biến `AGENT_KIT_ROLE`.
 
-| Giá trị | Bạn là | Việc của bạn |
+| Agent / vai trò | Việc của bạn | File hướng dẫn |
 |---|---|---|
-| `worker` hoặc không đặt | Người làm task | Làm đúng task được giao, tự chấm, commit, báo cáo |
-| `planner` | Người chia việc | Đọc `design/<feature>/`, ghi epic + tasks vào `tasks/<feature>/` |
-| `test-writer` | Người ra đề | Viết test ẩn vào `.agent-kit/holdout-staging/<task-id>/` |
-| `reviewer` | Người chấm | Đọc diff + log, trả về một khối JSON PASS/FAIL, không sửa gì |
-
-Định nghĩa chi tiết của planner, test-writer, reviewer nằm trong `.claude/agents/`.
+| agent chủ | Điều phối, không tự làm việc của agent con | `docs/orchestration.md` |
+| `context-writer` | Đề xuất bối cảnh vào `.agent-kit/proposals/` | `.claude/agents/context-writer.md` |
+| `planner` | Design → epic + tasks nháp trong `tasks/<feature>/` | `.claude/agents/planner.md` |
+| `bug-triager` | Bug report → task nháp trong `tasks/bugs/` | `.claude/agents/bug-triager.md` |
+| `test-writer` | Test ẩn vào `.agent-kit/holdout-staging/<task-id>/` | `.claude/agents/test-writer.md` |
+| `implementer` (= `worker`) | Làm một task, tự chấm, commit, báo cáo | `.claude/agents/implementer.md` |
+| `reviewer` | Đọc diff + log, trả JSON PASS/FAIL, không sửa gì | `.claude/agents/reviewer.md` |
 
 ### 10.2 Thứ tự đọc khi bắt đầu
 

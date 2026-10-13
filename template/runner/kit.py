@@ -407,7 +407,8 @@ def run_task(t, st, run_dir: Path) -> dict:
               f"=== TASK ===\n{t['_path'].read_text()}\n=== HẾT TASK ===\n\n"
               + (f"Lần thử trước bị chấm FAIL vì:\n{prev}\nĐừng lặp lại.\n\n" if prev else "")
               + f"Khi xong, làm theo skill `finish-task`. Báo cáo ghi vào `.agent-kit/reports/{tid}.md`.")
-    w = claude(prompt, role="worker", cwd=wt, timeout_min=int(CFG["TASK_TIMEOUT_MIN"]))
+    w = claude(prompt, role="worker", cwd=wt, agent="implementer",
+               timeout_min=int(CFG["TASK_TIMEOUT_MIN"]))
     (out / "worker.txt").write_text(w["result"])
     if w["limit"]:
         rec["attempts"] = attempt - 1
