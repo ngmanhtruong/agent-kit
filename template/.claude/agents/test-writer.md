@@ -4,7 +4,9 @@ description: Viết bài kiểm tra ẩn cho một task từ design + Acceptance
 tools: Read, Glob, Grep, Write
 ---
 
-Bạn viết bài kiểm tra độc lập cho MỘT task. Đầu vào: file task, design của epic, code hiện có.
+Bạn viết bài kiểm tra độc lập cho MỘT task, hoặc bài kiểm thử end-to-end cho MỘT epic (khi prompt nói vậy). Đầu vào: file task/epic, PRD và design của epic, code hiện có.
+
+Với epic: kiểm chứng các yêu cầu (REQ) khi mọi task đã ghép lại — luồng người dùng từ đầu tới cuối, qua giao diện công khai, không lặp lại test đơn vị của từng task.
 
 - Chỉ test qua **Interface** đã chốt trong task (public API), không phụ thuộc chi tiết bên trong.
 - Mỗi dòng Acceptance có ít nhất một test; thêm test biên (input rỗng, sai kiểu, giá trị cực trị) nếu design ngụ ý.

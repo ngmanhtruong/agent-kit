@@ -4,6 +4,7 @@ type: task            # epic | task | bug
 epic: FEAT
 status: draft         # draft (nháp) → approved (bạn duyệt). Trạng thái chạy nằm ở GitHub Issue.
 depends_on: []
+requirements: []      # mã yêu cầu trong PRD mà task này phục vụ, vd [REQ-01, REQ-03] (bỏ trống nếu không dùng PRD)
 priority: 2           # 1 = làm trước
 holdout: true         # có viết bài kiểm tra ẩn không
 design: design/feat

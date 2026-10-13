@@ -17,6 +17,10 @@ Lưu ý: `template/CLAUDE.md`, `template/docs/` là **mẫu** cho project đích
 1c. `work` không chạy spec cũ: `git pull --ff-only` thất bại thì dừng.
 1d. `kit.py` chạy với mọi agent qua `call_agent()` (chế độ `claude` / `cli` qua `AGENT_CMD` / `chat`). Không gọi thẳng một CLI cụ thể ở chỗ khác. Chỉ `work` và `plan` cần AI; `approve`, `status`, `report`, `doctor`, `sync`, `set`, `import` không bao giờ gọi AI. Chế độ `chat`: `work` là máy trạng thái, mỗi lần chạy làm một bước, lưu ở `.agent-kit/session.json`, in **BƯỚC TIẾP THEO**. Bài test ẩn được viết trong `work`, trước khi implementer bắt đầu.
 1e. Việc chấm (`grade()`) phải do kit.py làm và giống nhau cho mọi agent: có diff, không sửa vùng bảo vệ (`PROTECTED` trong kit.py, giữ khớp với hooks), checks pass, test ẩn pass. Không bao giờ tin agent tự báo kết quả.
+1f. Khâu **bắt buộc** (không thêm công tắc tắt): lập kế hoạch (task có Acceptance, `approve`), tự chấm (`grade()` + reviewer luôn chạy), kiểm thử (test ẩn theo `holdout` của task, kiểm thử cấp epic khi epic sang `verify`). Mọi khâu khác **tuỳ chọn**, chỉ chạy khi người dùng gọi hoặc bật trong config (idea/PRD, trace, context-writer, bug-triager, GitHub, publish, Telegram). Không thêm bước tốn token chạy mặc định.
+1g. PRD (`design/<feature>/prd.md`) là tuỳ chọn: `plan` vẫn chạy khi không có PRD (trừ `REQUIRE_PRD=1`), nhưng nếu có PRD thì phải `approved`. Mã yêu cầu đọc bằng `REQ_DEF_RE`; task trỏ về bằng `requirements:`.
+1h. Epic: mọi task `done` → `verify` (trong `sync`) → `work` kiểm thử trên nhánh gốc → `done`/`failed`. FAIL chỉ mở GitHub Issue (`bug,agent-ready`), không ghi `tasks/`. Task sửa có `epic: <mã>` merge xong → epic tự về `verify`.
+1i. Deploy/staging/production **không** thuộc kit; chỉ tài liệu hoá (README mục 2.6).
 2. Test ẩn không bao giờ nằm trong repo đích hay trong tầm đọc của worker/implementer.
 3. Chỉ runner (script) được push, tạo PR/issue. Agent thì không.
 4. Hook dùng `onFailure: "block"`: hook lỗi thì chặn.

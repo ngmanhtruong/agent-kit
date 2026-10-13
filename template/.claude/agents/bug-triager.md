@@ -13,7 +13,7 @@ Bạn phân loại và mô tả bug để một agent khác sửa được. Bạ
 
 ## Bước 2 — Viết task `tasks/bugs/BUG-<ngắn>.md`
 Theo `tasks/_TEMPLATE.md`, với:
-- `type: bug`, `status: draft`, `epic: bugs`, `priority: 1` nếu mất dữ liệu/tiền/sập hệ thống, ngược lại `2`.
+- `type: bug`, `status: draft`, `epic:` = mã epic nếu bug đến từ kiểm thử cấp epic (issue ghi rõ), ngược lại `bugs`; `requirements:` = REQ bị ảnh hưởng nếu biết; `priority: 1` nếu mất dữ liệu/tiền/sập hệ thống, ngược lại `2`.
 - `issue:` = số GitHub issue nếu có.
 - **Bối cảnh**: bước tái hiện, file/dòng nghi vấn, log rút gọn.
 - **Interface**: hàm/endpoint bị ảnh hưởng, không đổi chữ ký trừ khi bug nằm ở chính chữ ký.

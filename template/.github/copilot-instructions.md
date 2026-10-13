@@ -8,7 +8,7 @@ Repo này dùng **agent-kit**. Toàn bộ bối cảnh và quy tắc viết cho 
 
 ## Vai trò
 
-Mỗi loại việc có một file hướng dẫn trong `.claude/agents/<tên>.md` (planner, bug-triager, context-writer, test-writer, implementer, reviewer). Khi người dùng giao việc:
+Mỗi loại việc có một file hướng dẫn trong `.claude/agents/<tên>.md` (product-analyst, planner, bug-triager, context-writer, test-writer, implementer, reviewer). Khi người dùng giao việc:
 - Xác định vai trò phù hợp theo `docs/orchestration.md`.
 - Đọc file `.claude/agents/<vai trò>.md` và làm **đúng một vai trò** đó, kể cả giới hạn "chỉ được ghi vào đâu".
 - Không đọc bài test ẩn (`~/.agent-holdout/`). Chỉ viết test ẩn khi `kit.py work` giao vai test-writer.
@@ -17,6 +17,7 @@ Mỗi loại việc có một file hướng dẫn trong `.claude/agents/<tên>.m
 
 Rào cứng (hooks) của agent-kit chỉ chạy trong Claude Code. Trong Copilot, bạn phải tự tuân thủ:
 - Không sửa `eval/`, `.claude/`, `runner/`, `docs/`, `design/`, `CLAUDE.md`, `.env*` trừ khi người dùng yêu cầu rõ.
+- Chỉ sửa `design/<feature>/prd.md` khi đóng vai product-analyst; không tự đổi PRD sang `approved`.
 - Chỉ sửa `tasks/` khi đóng vai planner hoặc bug-triager. Không tự đổi `status: draft` thành `approved` — việc duyệt là của người dùng (`python3 runner/kit.py approve`).
 - Không `git push`, không tạo PR/issue (kit.py làm việc đó sau khi chấm).
 - Không nới test hay hardcode để test pass. "Xong" = `bash eval/checks.sh` exit 0 và mọi dòng Acceptance đạt.
@@ -38,4 +39,5 @@ python3 runner/kit.py status
 python3 runner/kit.py report
 python3 runner/kit.py report --task <id>
 python3 runner/kit.py doctor
+python3 runner/kit.py trace      # yêu cầu (REQ) → task → trạng thái
 ```

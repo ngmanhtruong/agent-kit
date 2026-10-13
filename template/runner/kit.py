@@ -14,9 +14,15 @@ Kiểm tra (chỉ đọc — an toàn chạy trên bất kỳ máy nào, bất k
   python3 runner/kit.py report --task <id>       chi tiết một task: lý do, log, báo cáo, nhánh
   python3 runner/kit.py doctor                   kiểm tra toàn bộ: cài đặt, agent, tasks, đồng bộ
 
+Vòng đời: ý tưởng → PRD (REQ-xx) → design → epic/task → work (chấm từng task) → PR → merge
+          → kiểm thử cấp epic → done. Deploy/staging/production: tự bổ sung (xem README).
+
 Làm việc:
-  python3 runner/kit.py plan design/<feature>    planner chia design thành tasks nháp
-  python3 runner/kit.py approve <id|epic|all>    duyệt nháp → GitHub Issue (không gọi AI)
+  python3 runner/kit.py idea design/<feature>    product-analyst: idea.md → prd.md (yêu cầu có mã REQ-xx)
+  python3 runner/kit.py approve design/<feature> duyệt PRD
+  python3 runner/kit.py plan design/<feature>    planner chia PRD + design thành epic/tasks nháp
+  python3 runner/kit.py trace [design/<feature>] yêu cầu → task → trạng thái (chỉ đọc)
+  python3 runner/kit.py approve <id|epic|all>    duyệt task nháp → GitHub Issue (không gọi AI)
   python3 runner/kit.py work [--max N] [--task ID]   phiên làm việc: làm các task sẵn sàng
   python3 runner/kit.py work --abort             (chế độ chat) huỷ task đang làm, không tính lượt
   python3 runner/kit.py sync                     PR merged → done; cập nhật và chia sẻ trạng thái
@@ -50,7 +56,7 @@ ROOT = Path(__file__).resolve().parent.parent
 TASKS = ROOT / "tasks"
 STATE_DIR = ROOT / ".agent-kit"
 STATE_FILE = STATE_DIR / "state.json"
-STATUSES = ["draft", "queued", "running", "review", "done", "failed"]
+STATUSES = ["draft", "queued", "running", "review", "verify", "done", "failed"]
 LIMIT_RE = re.compile(r"usage limit|rate.?limit|limit reached|quota", re.I)
 
 
@@ -59,10 +65,10 @@ def load_config() -> dict:
     cfg = {
         "BASE_BRANCH": "main", "MAX_TASKS": "3", "TASK_TIMEOUT_MIN": "60",
         "MAX_ATTEMPTS": "2", "MAX_BUDGET_USD": "", "CLAUDE_BIN": "claude",
-        "HOLDOUT_DIR": "", "HOLDOUT_CMD": "", "REVIEW": "1",
+        "HOLDOUT_DIR": "", "HOLDOUT_CMD": "", "REQUIRE_PRD": "0",
         "GH_SYNC": "0", "GIT_PULL": "1", "PUBLISH": "1",
         "LOG_BRANCH": "agent-kit/log", "MACHINE_NAME": "", "LOCK_HOURS": "12",
-        "STALE_RUN_HOURS": "",
+        "STALE_RUN_HOURS": "", "EPIC_TEST_CMD": "",
         "TELEGRAM_BOT_TOKEN": "", "TELEGRAM_CHAT_ID": "",
         "WORKTREE_ROOT": str(ROOT.parent / f".agent-worktrees-{ROOT.name}"),
     }
@@ -78,6 +84,9 @@ def load_config() -> dict:
 
 
 CFG = load_config()
+# Hidden tests are core (not optional): default location outside the repo.
+if not CFG.get("HOLDOUT_DIR"):
+    CFG["HOLDOUT_DIR"] = os.path.expanduser(f"~/.agent-holdout/{ROOT.name}")
 HOST = re.sub(r"[^A-Za-z0-9_.-]", "-", CFG.get("MACHINE_NAME") or socket.gethostname().split(".")[0]) or "host"
 LOG_BRANCH = CFG["LOG_BRANCH"]
 LOG_REF = f"refs/remotes/origin/{LOG_BRANCH}"
@@ -193,6 +202,37 @@ def acceptance_ok(t: dict) -> bool:
     items = [l for l in sec.group(1).splitlines()
              if re.match(r"\s*- \[.\]", l) and "<!--" not in l and "checks.sh" not in l]
     return len(items) > 0
+
+
+# ───────────────────────── product requirements (PRD) ─────────────────────────
+# design/<feature>/idea.md   — the human's idea (free text)
+# design/<feature>/prd.md    — requirements with ids (REQ-01 ...), status draft|approved
+# tasks/*.md `requirements:` — which REQ ids a task serves (traceability)
+REQ_DEF_RE = re.compile(r"^\s*(?:[-*]\s*)?(?:#+\s*)?\**\s*(REQ-\d+)\b", re.M)
+
+
+def load_prd(feature_dir: Path):
+    p = feature_dir / "prd.md"
+    if not p.exists():
+        return None
+    text = p.read_text()
+    m = re.match(r"^---\n(.*?)\n---\n?(.*)$", text, re.S)
+    head, body = (m.group(1), m.group(2)) if m else ("", text)
+    st = re.search(r"^status:\s*(\w+)", head, re.M)
+    return {"path": p, "dir": feature_dir, "status": st.group(1) if st else "draft",
+            "reqs": sorted(set(REQ_DEF_RE.findall(body)), key=lambda x: int(x.split("-")[1])),
+            "body": body}
+
+
+def all_prds() -> dict:
+    d = ROOT / "design"
+    return {str(p.parent.relative_to(ROOT)): load_prd(p.parent)
+            for p in sorted(d.glob("*/prd.md"))} if d.exists() else {}
+
+
+def task_reqs(t: dict) -> list:
+    r = t.get("requirements") or []
+    return [r] if isinstance(r, str) and r else list(r)
 
 
 # ───────────────────────── shared log branch ─────────────────────────
@@ -592,6 +632,39 @@ def cmd_report(args):
     print("Chi tiết một task: python3 runner/kit.py report --task <id>")
 
 
+def cmd_trace(args):
+    """Requirement → tasks → status. Read-only."""
+    st, _, _ = view_state(fetch=not args.offline)
+    tasks, prds = load_tasks(), all_prds()
+    if args.design_dir:
+        key = str(feature_arg(args.design_dir).relative_to(ROOT))
+        prds = {k: v for k, v in prds.items() if k == key}
+    if not prds:
+        print("Chưa có PRD nào (design/<feature>/prd.md). Tạo bằng: python3 runner/kit.py idea design/<feature>")
+        return
+    for rel, prd in prds.items():
+        ts = [t for t in tasks.values() if str(t.get("design", "")).rstrip("/") == rel and t["type"] != "epic"]
+        epics = [t for t in tasks.values() if str(t.get("design", "")).rstrip("/") == rel and t["type"] == "epic"]
+        print(f"══ {rel} · PRD {prd['status']} · {len(prd['reqs'])} yêu cầu")
+        for e in epics:
+            print(f"   epic {e['id']}: {status_of(e, st)}")
+        rows, done_reqs = [("REQ", "TASK", "TRẠNG THÁI")], 0
+        for req in prd["reqs"]:
+            linked = [t for t in ts if req in task_reqs(t)]
+            if not linked:
+                rows.append((req, "—", "CHƯA CÓ TASK"))
+                continue
+            sts = [status_of(t, st) for t in linked]
+            done_reqs += all(x == "done" for x in sts)
+            for i, t in enumerate(linked):
+                rows.append((req if i == 0 else "", str(t["id"]), sts[i]))
+        table(rows)
+        unknown = sorted({r for t in ts for r in task_reqs(t) if r not in prd["reqs"]})
+        if unknown:
+            print(f"   ✗ task trỏ tới yêu cầu không có trong PRD: {', '.join(unknown)}")
+        print(f"   Hoàn thành: {done_reqs}/{len(prd['reqs'])} yêu cầu (mọi task của yêu cầu đã merge)\n")
+
+
 def claude_version_ok():
     if not shutil.which(CFG["CLAUDE_BIN"]) and not Path(CFG["CLAUDE_BIN"]).exists():
         return None, "không tìm thấy"
@@ -662,6 +735,11 @@ def cmd_doctor(args):
         say("✓", "eval/checks.sh đã cấu hình")
     else:
         say("✗", "eval/checks.sh chưa có bước nào → mọi task sẽ FAIL")
+    hold_tasks = [t for t in load_tasks().values() if t.get("holdout") is True and t.get("status") == "approved"]
+    if hold_tasks and not CFG.get("HOLDOUT_CMD"):
+        say("✗", f"{len(hold_tasks)} task có holdout: true nhưng HOLDOUT_CMD trống → không chạy được test ẩn")
+    elif CFG.get("HOLDOUT_CMD"):
+        say("✓", f"test ẩn: {CFG['HOLDOUT_DIR']} · lệnh `{CFG['HOLDOUT_CMD']}`")
     if has_origin():
         say("✓", "có remote origin")
     else:
@@ -721,6 +799,25 @@ def cmd_doctor(args):
     if not problems and tasks:
         say("✓", f"{len(tasks)} task đọc được")
 
+    print("\nYêu cầu (PRD)")
+    prds = all_prds()
+    for rel, prd in prds.items():
+        ts = [t for t in tasks.values() if str(t.get("design", "")).rstrip("/") == rel and t["type"] != "epic"]
+        if prd["status"] != "approved":
+            say("!", f"{rel}/prd.md chưa duyệt" + (" nhưng đã có task" if ts else ""))
+            continue
+        covered = {r for t in ts for r in task_reqs(t)}
+        missing = [r for r in prd["reqs"] if r not in covered]
+        unknown = sorted(covered - set(prd["reqs"]))
+        if missing and ts:
+            say("!", f"{rel}: yêu cầu chưa có task: {', '.join(missing)} → kit.py trace {rel}")
+        if unknown:
+            say("✗", f"{rel}: task trỏ tới yêu cầu không có trong PRD: {', '.join(unknown)}")
+        if not missing and not unknown and ts:
+            say("✓", f"{rel}: mọi {len(prd['reqs'])} yêu cầu đều có task")
+    if not prds:
+        say("✓", "chưa dùng PRD (không bắt buộc)")
+
     print("\nTrạng thái chạy")
     st = merge_states(load_state(), hosts)
     stale, remote_heads = [], None
@@ -766,29 +863,68 @@ def cmd_doctor(args):
 
 
 # ───────────────────────── write commands ─────────────────────────
-def cmd_plan(args):
-    d = (ROOT / args.design_dir).resolve()
+def chat_prompt(role: str, prompt: str, write_rule: str, next_line: str):
+    print("Chế độ chat: làm bước này trong Copilot Chat (chế độ Agent) hoặc trợ lý AI đang mở repo này.\n"
+          "Prompt cho agent:\n")
+    print("─" * 60)
+    print(f"Đọc và làm đúng theo `.claude/agents/{role}.md` (bạn đóng vai {role}).\n" + prompt + "\n" + write_rule)
+    print("─" * 60)
+    print("\n" + next_line)
+
+
+def feature_arg(path: str) -> Path:
+    d = (ROOT / path).resolve()
+    if d.name == "prd.md":
+        d = d.parent
     if not d.is_dir():
-        sys.exit(f"Không thấy thư mục design: {d}")
-    feature = d.name
+        sys.exit(f"Không thấy thư mục: {d}")
+    return d
+
+
+def cmd_idea(args):
+    d = feature_arg(args.design_dir)
+    rel = d.relative_to(ROOT)
+    if not any(p.is_file() and p.name != "prd.md" for p in d.iterdir()):
+        sys.exit(f"Viết ý tưởng vào `{rel}/idea.md` trước (mẫu: design/_IDEA_TEMPLATE.md).")
+    prd = load_prd(d)
+    if prd and prd["status"] == "approved":
+        sys.exit(f"`{rel}/prd.md` đã được duyệt. Muốn viết lại thì đổi `status: draft` trong file trước.")
     files = "\n".join(f"- {p.relative_to(ROOT)}" for p in sorted(d.rglob("*")) if p.is_file())
-    prompt = (f"Chia design trong `{d.relative_to(ROOT)}` thành epic + tasks.\n"
-              f"Các file design:\n{files}\n\n"
-              f"Ghi vào `tasks/{feature}/`. Theo đúng hướng dẫn của bạn và `tasks/_TEMPLATE.md`. "
-              f"Trường `design:` của mỗi task = `{d.relative_to(ROOT)}`.")
+    prompt = (f"Biến ý tưởng trong `{rel}` thành product brief + PRD.\nCác file:\n{files}\n\n"
+              f"Ghi `{rel}/prd.md` theo đúng `design/_PRD_TEMPLATE.md`, `status: draft`. "
+              f"Mỗi yêu cầu có mã REQ-01, REQ-02... và cách kiểm chứng đo được.")
+    nxt = (f"Xong thì đọc `{rel}/prd.md`, trả lời 'Câu hỏi mở', sửa cho đúng ý, rồi chạy: "
+           f"python3 runner/kit.py approve {rel}")
     if agent_mode() == "chat":
-        print("Chế độ chat: làm bước này trong Copilot Chat (chế độ Agent) hoặc trợ lý AI đang mở repo này.\n"
-              "Prompt cho agent:\n")
-        print("─" * 60)
-        print("Đọc và làm đúng theo `.claude/agents/planner.md` (bạn đóng vai planner).\n" + prompt +
-              "\nChỉ được tạo/sửa file trong `tasks/`. Mọi task để `status: draft`.")
-        print("─" * 60)
-        print(f"\nXong thì xem lại tasks/{feature}/ rồi chạy: python3 runner/kit.py approve {feature.upper()}")
-        return
-    print(f"Planner đang đọc {d.relative_to(ROOT)} ...")
+        return chat_prompt("product-analyst", prompt, f"Chỉ được tạo/sửa `{rel}/prd.md`.", nxt)
+    print(f"Product analyst đang đọc {rel} ...")
+    r = call_agent(prompt, role="product-analyst", cwd=ROOT, agent="product-analyst", timeout_min=30)
+    print(r["result"] + "\n\n" + nxt)
+
+
+def cmd_plan(args):
+    d = feature_arg(args.design_dir)
+    rel, feature = d.relative_to(ROOT), d.name
+    prd = load_prd(d)
+    if not prd and flag("REQUIRE_PRD"):
+        sys.exit(f"REQUIRE_PRD=1: cần PRD đã duyệt. Tạo bằng: python3 runner/kit.py idea {rel}")
+    if prd and prd["status"] != "approved":
+        sys.exit(f"PRD chưa được duyệt. Đọc `{rel}/prd.md` rồi chạy: python3 runner/kit.py approve {rel}")
+    files = "\n".join(f"- {p.relative_to(ROOT)}" for p in sorted(d.rglob("*")) if p.is_file())
+    prompt = (f"Chia design trong `{rel}` thành epic + tasks.\nCác file design:\n{files}\n\n"
+              f"Ghi vào `tasks/{feature}/`. Theo đúng hướng dẫn của bạn và `tasks/_TEMPLATE.md`. "
+              f"Trường `design:` của mỗi task = `{rel}`.")
+    if prd:
+        prompt += (f"\n\nPRD đã duyệt: `{rel}/prd.md` với các yêu cầu {', '.join(prd['reqs'])}. "
+                   f"Mỗi task ghi `requirements:` các REQ nó phục vụ; MỌI REQ phải có ít nhất một task. "
+                   f"Acceptance của task phải bám vào mục 'Kiểm chứng' của REQ tương ứng. "
+                   f"EPIC.md ghi `requirements:` là toàn bộ REQ và `holdout: true` nếu kiểm thử end-to-end được.")
+    nxt = f"Xem lại tasks/{feature}/, chạy `python3 runner/kit.py trace {rel}` để kiểm tra độ phủ, rồi: python3 runner/kit.py approve {feature.upper()}"
+    if agent_mode() == "chat":
+        return chat_prompt("planner", prompt, "Chỉ được tạo/sửa file trong `tasks/`. Mọi task để `status: draft`.", nxt)
+    print(f"Planner đang đọc {rel} ...")
     r = call_agent(prompt, role="planner", cwd=ROOT, agent="planner", timeout_min=30)
-    print(r["result"])
-    print("\nXem lại tasks/%s/ rồi chạy: python3 runner/kit.py approve %s" % (feature, feature.upper()))
+    print(r["result"] + "\n\n" + nxt)
 
 
 def ensure_labels():
@@ -798,10 +934,29 @@ def ensure_labels():
         gh(["label", "create", name, "--color", color, "--force"], check=False)
 
 
+def approve_prd(d: Path):
+    prd = load_prd(d)
+    rel = d.relative_to(ROOT)
+    if not prd:
+        sys.exit(f"Không có `{rel}/prd.md`. Tạo bằng: python3 runner/kit.py idea {rel}")
+    if prd["status"] == "approved":
+        sys.exit(f"`{rel}/prd.md` đã được duyệt từ trước.")
+    if not prd["reqs"]:
+        sys.exit("PRD chưa có yêu cầu nào dạng `- **REQ-01** ...` → chưa duyệt được.")
+    if re.search(r"<!--", prd["body"]):
+        print("! PRD còn chỗ `<!-- ... -->` chưa điền — kiểm tra lại nếu đó không phải chủ ý.")
+    set_front(prd["path"], "status", "approved")
+    print(f"✓ Đã duyệt PRD {rel} ({len(prd['reqs'])} yêu cầu: {', '.join(prd['reqs'])}).")
+    print(f"Tiếp theo: làm design (Claude Design, export vào `{rel}/`) nếu cần, rồi: python3 runner/kit.py plan {rel}")
+    print("Nhớ commit + push `design/`.")
+
+
 def cmd_approve(args):
+    key = args.target
+    if "/" in key or (ROOT / key).is_dir():
+        return approve_prd(feature_arg(key))
     tasks = load_tasks()
     st, _, _ = view_state()
-    key = args.target
     picked = [t for t in tasks.values()
               if t.get("status") == "draft" and
               (key == "all" or str(t["id"]) == key or str(t.get("epic", "")) == key)]
@@ -838,6 +993,14 @@ def cmd_approve(args):
 
 def holdout_prompt(t: dict) -> str:
     tid = str(t["id"])
+    if t["type"] == "epic":
+        prd = load_prd(ROOT / t["design"]) if t.get("design") else None
+        return (f"Viết bài kiểm thử END-TO-END cho epic `{t['_path'].relative_to(ROOT)}` "
+                f"(design: `{t.get('design', '')}`"
+                + (f", PRD: `{prd['path'].relative_to(ROOT)}`, yêu cầu {', '.join(task_reqs(t) or prd['reqs'])}" if prd else "")
+                + f"). Kiểm chứng các yêu cầu khi mọi task của epic đã ghép lại, chỉ qua giao diện công khai. "
+                f"Ghi vào `.agent-kit/holdout-staging/{tid}/` với đường dẫn tương đối giống nơi test thật nằm "
+                f"trong repo. Không sửa file nào khác.")
     return (f"Viết bài kiểm tra ẩn cho task `{t['_path'].relative_to(ROOT)}` "
             f"(design: `{t.get('design', '')}`). Ghi vào `.agent-kit/holdout-staging/{tid}/` "
             f"với đường dẫn tương đối giống nơi test thật nằm trong repo. Không sửa file nào khác.")
@@ -911,15 +1074,24 @@ def cmd_sync(_args=None, quiet=False):
                 set_status(t, st, "done")
             elif state == "CLOSED":
                 set_status(t, st, "failed", note="PR bị đóng không merge")
-    # 3) epic done when all its tasks are done
-    for e in [t for t in tasks.values() if t["type"] == "epic"]:
-        kids = [t for t in tasks.values() if t.get("epic") == e.get("epic", e["id"]) and t["type"] != "epic"]
-        if kids and all(status_of(k, st) == "done" for k in kids) and status_of(e, st) != "done":
-            set_status(e, st, "done")
+    # 3) epic → 'verify' when all its tasks are merged (or again after fixes land)
+    for e in [t for t in tasks.values() if t["type"] == "epic" and t.get("status") == "approved"]:
+        kids = epic_kids(tasks, e)
+        if not kids or not all(status_of(k, st) == "done" for k in kids):
+            continue
+        es, erec = status_of(e, st), st.get(str(e["id"]), {})
+        newest_kid = max(str(st.get(str(k["id"]), {}).get("updated", "")) for k in kids)
+        if es not in ("verify", "done", "failed") or (es == "failed" and newest_kid > str(erec.get("updated", ""))):
+            set_status(e, st, "verify", attempts=0, last_fail=None)
     save_state(st)
     publish(st, msg="sync")
     if not quiet:
         cmd_status(argparse.Namespace(offline=True))
+
+
+def epic_kids(tasks: dict, e: dict) -> list:
+    eid = str(e.get("epic") or e["id"])
+    return [t for t in tasks.values() if str(t.get("epic", "")) == eid and t["type"] != "epic"]
 
 
 def cmd_set(args):
@@ -984,9 +1156,10 @@ def ready_tasks(tasks, st):
     return sorted(out, key=lambda t: (t["priority"], str(t["id"])))
 
 
-def run_holdout(t, wd: Path, log: Path):
+def run_holdout(t, wd: Path, log: Path, cmd: str = ""):
+    cmd = cmd or CFG.get("HOLDOUT_CMD", "")
     src = Path(CFG["HOLDOUT_DIR"]) / str(t["id"]) if CFG.get("HOLDOUT_DIR") else None
-    if not src or not src.exists() or not CFG.get("HOLDOUT_CMD"):
+    if not src or not src.exists() or not cmd:
         return None
     copied = []
     for f in src.rglob("*"):
@@ -996,7 +1169,7 @@ def run_holdout(t, wd: Path, log: Path):
             shutil.copy2(f, dst)
             copied.append(dst)
     try:
-        r = run(CFG["HOLDOUT_CMD"], cwd=wd, timeout=900, shell=True)
+        r = run(cmd, cwd=wd, timeout=900, shell=True)
         log.write_text(r.stdout + "\n" + r.stderr)
         return r.returncode == 0
     finally:
@@ -1140,7 +1313,7 @@ def run_task(t, st, run_dir: Path) -> dict:
             raise LimitHit(w["result"][-300:])
         g = grade(t, wt)
         review = {"verdict": "SKIPPED", "reasons": [], "risks": [], "human_should_check": []}
-        if flag("REVIEW") and g["has_diff"]:
+        if g["has_diff"]:  # independent review is core grading — always on
             rv = call_agent(reviewer_prompt(t, g), role="reviewer", cwd=wt, agent="reviewer", timeout_min=20)
             if rv["limit"]:
                 set_status(t, st, "queued", attempts=attempt - 1)
@@ -1192,7 +1365,7 @@ def summarize(results, todo, stopped, run_dir: Path, started: str, st: dict) -> 
         lines.append(f"{'✅' if r['passed'] else '❌'} {r['id']} {r.get('pr') or r.get('branch') or ''}".rstrip())
         if not r["passed"]:
             lines += [f"   · {x}" for x in r["reasons"][:3]]
-    if not todo:
+    if not todo and not results:
         lines.append("Không có task nào sẵn sàng.")
     if stopped:
         lines.append(stopped)
@@ -1215,6 +1388,71 @@ def new_run_dir() -> Path:
     return d
 
 
+def epics_to_verify(tasks: dict, st: dict) -> list:
+    return sorted([e for e in tasks.values() if e["type"] == "epic" and status_of(e, st) == "verify"],
+                  key=lambda e: str(e["id"]))
+
+
+def verify_epic(e: dict, st: dict, wd: Path, run_dir: Path) -> dict:
+    """End-to-end check of an epic on the base branch, after all its tasks are merged."""
+    eid = str(e["id"])
+    out = run_dir / eid
+    out.mkdir(parents=True, exist_ok=True)
+    chk = run(["bash", "eval/checks.sh"], cwd=wd, timeout=900)
+    (out / "checks.log").write_text(chk.stdout + "\n" + chk.stderr)
+    hold = run_holdout(e, wd, out / "holdout.log", CFG.get("EPIC_TEST_CMD", ""))
+    passed = chk.returncode == 0 and hold is not False
+    reasons = ([] if chk.returncode == 0 else ["eval/checks.sh FAIL trên nhánh gốc"]) + \
+              ([] if hold is not False else ["kiểm thử end-to-end của epic FAIL"])
+    base_sha = git(["rev-parse", "--short", "HEAD"], cwd=wd).stdout.strip()
+    result = {"id": eid, "passed": passed, "reasons": reasons, "branch": "", "epic": True,
+              "base_sha": base_sha, "host": HOST, "finished": now(),
+              "requirements": task_reqs(e)}
+    (out / "result.json").write_text(json.dumps(result, indent=2, ensure_ascii=False))
+    (out / "review.json").write_text(json.dumps({"verdict": "PASS" if passed else "FAIL", "reasons": reasons}))
+    if passed:
+        set_status(e, st, "done", base_sha=base_sha, last_fail=None)
+    else:
+        note = "\n".join(f"- {x}" for x in reasons)
+        set_status(e, st, "failed", base_sha=base_sha, last_fail=note)
+        if flag("GH_SYNC"):
+            tail_txt = ((out / "holdout.log").read_text() if (out / "holdout.log").exists() else "")[-1500:]
+            gh(["label", "create", "agent-ready", "--color", "0e8a16", "--force"], check=False)
+            r = gh(["issue", "create", "--title", f"[{eid}] Kiểm thử epic FAIL",
+                    "--label", "bug,agent-ready", "--body",
+                    f"Kiểm thử cấp epic `{eid}` FAIL trên `{CFG['BASE_BRANCH']}` @ `{base_sha}` ({HOST}).\n{note}\n\n"
+                    f"Yêu cầu liên quan: {', '.join(task_reqs(e)) or '-'}\n\n```\n{tail_txt}\n```\n\n"
+                    f"Bước tiếp: `python3 runner/kit.py import`, để bug-triager viết task sửa với `epic: {eid}`, "
+                    f"duyệt rồi `work`. Khi task sửa merge xong, epic tự được kiểm thử lại.\n\n"
+                    f"# Acceptance\n- [ ] kiểm thử end-to-end của epic {eid} pass"], check=False)
+            m = re.search(r"https://\S+/issues/\d+", r.stdout)
+            if m:
+                result["reasons"].append(f"đã mở bug {m.group(0)}")
+    return result
+
+
+def run_epic_checks(tasks: dict, st: dict, run_dir: Path) -> list:
+    """Batch mode: verify every epic waiting for it, in a clean worktree of the base branch."""
+    results = []
+    for e in epics_to_verify(tasks, st):
+        print(f"▶ kiểm thử epic {e['id']}")
+        if needs_holdout(e):
+            print(f"  viết kiểm thử end-to-end cho {e['id']} ...")
+            if not write_holdout(e):
+                results.append({"id": str(e["id"]), "passed": False, "reasons": ["test-writer không viết được kiểm thử epic (thử lại phiên sau)"]})
+                continue
+        wt = Path(CFG["WORKTREE_ROOT"]) / f"_epic-{e['id']}"
+        if wt.exists():
+            git(["worktree", "remove", "--force", str(wt)], check=False)
+        git(["worktree", "add", "-q", "--detach", str(wt), CFG["BASE_BRANCH"]])
+        try:
+            results.append(verify_epic(e, st, wt, run_dir))
+        finally:
+            git(["worktree", "remove", "--force", str(wt)], check=False)
+        publish(st, run_dir, msg=f"epic {e['id']}")
+    return results
+
+
 def work_batch(args):
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     lock = STATE_DIR / "work.lock"
@@ -1231,6 +1469,11 @@ def work_batch(args):
         todo = todo[: args.max or int(CFG["MAX_TASKS"])]
         started, run_dir = now(), new_run_dir()
         results, stopped = [], ""
+        try:
+            results += run_epic_checks(tasks, st, run_dir)
+        except LimitHit as e:
+            stopped = f"Dừng sớm: chạm giới hạn gói ({e})"
+            todo = []
         for t in todo:
             print(f"▶ {t['id']}")
             try:
@@ -1301,6 +1544,15 @@ def chat_finish(t, st, s, g, review):
     print("Còn task khác? Chạy lại: python3 runner/kit.py work")
 
 
+def chat_verify_epic(e: dict, st: dict, s: dict):
+    run_dir = STATE_DIR / "runs" / s["run_dir"]
+    r = verify_epic(e, st, ROOT, run_dir)
+    SESSION.unlink(missing_ok=True)
+    summarize([r], [e], "", run_dir, s["started"], st)
+    release_lock()
+    print("Chạy lại `python3 runner/kit.py work` để làm tiếp các task.")
+
+
 def work_chat(args):
     s = load_session()
     tasks = load_tasks()
@@ -1325,6 +1577,22 @@ def work_chat(args):
         preflight()
         cmd_sync(quiet=True)
         st, _, _ = view_state(fetch=False)
+        epics = [] if args.task else epics_to_verify(tasks, st)
+        if epics:
+            e = epics[0]
+            s = {"task": str(e["id"]), "stage": "epic", "started": now(), "host": HOST,
+                 "run_dir": new_run_dir().name}
+            save_session(s)
+            print(f"Mọi task của epic {e['id']} đã merge → kiểm thử cấp epic.")
+            if needs_holdout(e):
+                shutil.rmtree(STATE_DIR / "holdout-staging" / str(e["id"]), ignore_errors=True)
+                s["stage"] = "epic-holdout"
+                save_session(s)
+                say_step(f"VIẾT KIỂM THỬ END-TO-END cho epic {e['id']} (vai test-writer)",
+                         "Nên làm trong MỘT CUỘC CHAT MỚI.\n"
+                         "Đọc và làm đúng theo `.claude/agents/test-writer.md`.\n\n" + holdout_prompt(e))
+                return
+            return chat_verify_epic(e, st, s)
         ready = [t for t in ready_tasks(tasks, st) if not args.task or str(t["id"]) == args.task]
         if not ready:
             release_lock()
@@ -1349,6 +1617,13 @@ def work_chat(args):
     t = tasks.get(s["task"])
     if not t:
         sys.exit(f"Task {s['task']} của phiên đang mở không còn trong tasks/. Huỷ: python3 runner/kit.py work --abort")
+
+    if s["stage"] == "epic-holdout":
+        if not collect_holdout(str(t["id"])):
+            say_step(f"VIẾT KIỂM THỬ END-TO-END cho epic {t['id']} (chưa thấy file nào)",
+                     f"Chưa có file nào trong `.agent-kit/holdout-staging/{t['id']}/`.\n\n" + holdout_prompt(t))
+            return
+        return chat_verify_epic(t, st, s)
 
     if s["stage"] == "holdout":
         if not collect_holdout(str(t["id"])):
@@ -1376,7 +1651,7 @@ def work_chat(args):
                 return
             chat_finish(t, st, s, g, {"verdict": "SKIPPED", "reasons": [f"hết {limit} lần sửa"]})
             return
-        if flag("REVIEW"):
+        if True:  # independent review is core grading — always on
             s.update(stage="review", grade=g)
             save_session(s)
             (STATE_DIR / "reviews").mkdir(parents=True, exist_ok=True)
@@ -1420,7 +1695,10 @@ def main():
     p = sub.add_parser("report"); p.add_argument("--last", type=int, default=0)
     p.add_argument("--task"); p.set_defaults(fn=cmd_report)
     p = sub.add_parser("doctor"); p.add_argument("--fix", action="store_true"); p.set_defaults(fn=cmd_doctor)
+    p = sub.add_parser("idea"); p.add_argument("design_dir"); p.set_defaults(fn=cmd_idea)
     p = sub.add_parser("plan"); p.add_argument("design_dir"); p.set_defaults(fn=cmd_plan)
+    p = sub.add_parser("trace"); p.add_argument("design_dir", nargs="?"); p.add_argument("--offline", action="store_true")
+    p.set_defaults(fn=cmd_trace)
     p = sub.add_parser("approve"); p.add_argument("target"); p.set_defaults(fn=cmd_approve)
     p = sub.add_parser("work"); p.add_argument("--max", type=int, default=0)
     p.add_argument("--task"); p.add_argument("--abort", action="store_true"); p.set_defaults(fn=cmd_work)

@@ -54,31 +54,50 @@ Các nguyên tắc đi kèm:
 Không có máy "ngày" hay máy "đêm". Mọi máy ngang hàng; một **phiên làm việc** (`kit.py work`) chạy lúc nào cũng được, trên máy nào cũng được, với agent nào cũng được (xem mục 2.5). Các bước chuẩn bị và review làm ở máy nào cũng được.
 
 ```
- CHUẨN BỊ (bất kỳ máy nào)            PHIÊN `kit.py work` (bất kỳ máy,         REVIEW (bất kỳ máy nào)
-                                      bất kỳ agent, lúc nào cũng được)
- ──────────────────────────           ─────────────────────────────────────   ──────────────────────
- 1. Claude Design                     5. với mỗi task sẵn sàng:                 7. status / report
-    → export vào design/<feature>/       a. TEST-WRITER viết test ẩn (nếu cần)   8. GitHub: đọc PR
- 2. kit.py plan                          b. tạo nhánh + worktree riêng              (đã kèm điểm chấm)
-    → planner sinh tasks nháp            c. IMPLEMENTER làm bài                  9. Merge hoặc đóng PR
- 3. Bạn sửa, trả lời câu hỏi mở          d. eval/checks.sh  (thang điểm)         10. kit.py sync
- 4. kit.py approve (không cần Claude)    e. test ẩn         (worker không thấy)      → task "done",
-    → GitHub Issue                       f. REVIEWER chấm độc lập                     mở khoá task phụ thuộc
-    → git push                           g. PASS → push + mở PR
-                                            FAIL → thử lại, kèm lý do lần trước
-                                      6. Tóm tắt → nhánh log + Telegram
+ CHUẨN BỊ (bất kỳ máy nào)             PHIÊN `kit.py work` (bất kỳ máy,          REVIEW (bất kỳ máy nào)
+                                       bất kỳ agent, lúc nào cũng được)
+ ───────────────────────────           ──────────────────────────────────────   ──────────────────────
+ 0. (tuỳ chọn) ý tưởng → PRD           5. epic nào đã merge đủ task:             7. status / report / trace
+    idea.md → kit.py idea                 kiểm thử END-TO-END cấp epic          8. GitHub: đọc PR
+    → prd.md (REQ-01..) → approve          (FAIL → mở bug, sửa xong tự kiểm lại)     (đã kèm điểm chấm)
+ 1. (tuỳ chọn) Claude Design           6. với mỗi task sẵn sàng:                 9. Merge hoặc đóng PR
+    → export vào design/<feature>/        a. TEST-WRITER viết test ẩn (nếu cần)  10. kit.py sync
+ 2. kit.py plan                           b. tạo nhánh riêng                         → task "done",
+    → planner sinh epic + tasks nháp      c. IMPLEMENTER làm bài                       mở khoá task phụ thuộc,
+      (mỗi task ghi REQ nó phục vụ)       d. eval/checks.sh  (thang điểm)              epic sang kiểm thử
+ 3. Bạn sửa, trả lời câu hỏi mở           e. test ẩn         (worker không thấy)
+    kit.py trace: REQ nào chưa có task    f. REVIEWER chấm độc lập
+ 4. kit.py approve (không gọi AI)         g. PASS → push + mở PR
+    → GitHub Issue → git push                FAIL → thử lại, kèm lý do lần trước
 ```
 
-### 2.2 Agent chủ và sáu agent con
+### 2.1.1 Khâu bắt buộc và khâu tuỳ chọn
+
+Mỗi khâu tốn token nên chỉ ba nhóm là bắt buộc; còn lại bạn dùng khi cần.
+
+| Khâu | Bắt buộc? | Tốn AI? | Ghi chú |
+|---|---|---|---|
+| Lập kế hoạch: task có Acceptance đo được, `approve` | **Bắt buộc** | `plan` tốn 1 lượt (hoặc bạn tự viết task) | Không có task duyệt thì không có gì để làm |
+| Tự chấm điểm: `checks.sh`, reviewer độc lập, phát hiện sửa vùng bảo vệ | **Bắt buộc** | reviewer: 1 lượt/task | Luôn chạy, không tắt được |
+| Kiểm thử: test ẩn từng task, kiểm thử cấp epic | **Bắt buộc** | test-writer: 1 lượt/task có `holdout: true`, 1 lượt/epic | Planner quyết task/epic nào có test ẩn (`holdout`); task thuần giao diện có thể `false` |
+| Ý tưởng → PRD (`idea`, product-analyst) | Tuỳ chọn | 1 lượt | Bật bắt buộc bằng `REQUIRE_PRD=1` |
+| Truy vết yêu cầu (`trace`, mục PRD trong `doctor`) | Tuỳ chọn | Không | Chỉ có tác dụng khi dùng PRD |
+| Claude Design | Tuỳ chọn | — | Có thể chỉ viết `spec.md` |
+| context-writer, bug-triager | Tuỳ chọn | 1 lượt mỗi lần gọi | Chỉ chạy khi bạn yêu cầu |
+| GitHub Issue/PR, chia sẻ nhiều máy, Telegram | Tuỳ chọn | Không | `GH_SYNC`, `PUBLISH`, `TELEGRAM_*` |
+| Deploy, staging, production | **Không có sẵn** | — | Tự bổ sung khi cần, xem mục 2.6 |
+
+### 2.2 Agent chủ và bảy agent con
 
 Mỗi công việc có một file hướng dẫn riêng trong `.claude/agents/<tên>.md`. **Agent chủ** (phiên agent bạn đang nói chuyện: Claude Code, Copilot Chat...) đọc `docs/orchestration.md` (được nạp sẵn qua `CLAUDE.md`) để biết khi nào spawn agent con nào, đưa đầu vào gì, kiểm tra đầu ra thế nào.
 
 | Agent con | Công việc | Ai gọi | Được ghi vào đâu |
 |---|---|---|---|
 | **context-writer** | Quét codebase → đề xuất `CLAUDE.md`, `architecture.md`, `checks.sh` | Agent chủ | chỉ `.agent-kit/proposals/` |
-| **planner** | Design → epic + tasks nháp | Agent chủ hoặc `kit.py plan` | chỉ `tasks/` |
+| **product-analyst** | (Tuỳ chọn) Ý tưởng → PRD có mã yêu cầu REQ-xx | Agent chủ hoặc `kit.py idea` | chỉ `design/` |
+| **planner** | PRD/spec + design → epic + tasks nháp, mỗi task ghi REQ nó phục vụ | Agent chủ hoặc `kit.py plan` | chỉ `tasks/` |
 | **bug-triager** | Bug report → task bug nháp có bước tái hiện | Agent chủ | chỉ `tasks/bugs/` |
-| **test-writer** | Task → bài test ẩn | `kit.py work` (trước khi làm task) | chỉ `.agent-kit/holdout-staging/` |
+| **test-writer** | Task → bài test ẩn; epic → kiểm thử end-to-end | `kit.py work` (trước khi làm task) | chỉ `.agent-kit/holdout-staging/` |
 | **implementer** | Làm một task đã duyệt | `kit.py work` hoặc agent chủ | mọi nơi **trừ** vùng bảo vệ |
 | **reviewer** | Chấm độc lập → JSON PASS/FAIL | `kit.py work` hoặc agent chủ | không ghi gì |
 
@@ -96,6 +115,13 @@ draft ──approve──▶ queued ──run────▶ running ──┬�
 - `draft`, `approved`: ghi trong file `tasks/*.md` (do **người** quyết).
 - `queued`, `running`, `review`, `done`, `failed`: trạng thái chạy, xem mục 2.4.
 - Task chỉ chạy khi đã `approved` **và** mọi task trong `depends_on` đã `done` (tức PR đã merge).
+
+Vòng đời một **epic**:
+```
+approved ──mọi task done──▶ verify ──work: kiểm thử end-to-end trên nhánh gốc──┬─ PASS ─▶ done
+                               ▲                                                └─ FAIL ─▶ failed
+                               └──── task sửa (epic: <mã epic>) merge xong ◀──── mở bug (GH_SYNC), import, bug-triager
+```
 
 ### 2.4 Nhiều máy cùng làm việc mà không sai lệch
 
@@ -138,6 +164,16 @@ Nhánh `agent-kit/log` không chứa code của bạn (tạo dạng orphan), kh�
 - Với `chat`, các vai trò test-writer và reviewer nên làm trong **một cuộc chat mới**, để không phải chính agent vừa làm bài tự chấm. Bài test ẩn nằm trên cùng máy, nên "ẩn" ở đây dựa vào quy ước; kit.py không cho agent xem nội dung test khi chấm FAIL.
 - Với `chat`, task được làm ngay trong thư mục repo đang mở (kit.py tạo và chuyển sang nhánh `agent/<task>-a<n>`, xong thì chuyển về nhánh gốc).
 
+### 2.6 Mở rộng: deploy, staging, production (không có sẵn)
+
+agent-kit dừng ở mức **code đã merge và đã kiểm thử cấp epic**. Deploy phụ thuộc hạ tầng từng project nên không đóng gói sẵn. Nếu cần, gợi ý cách thêm mà không phá các nguyên tắc của kit:
+
+1. **Script riêng của project:** `deploy/staging.sh`, `deploy/production.sh`, `deploy/rollback.sh`, `deploy/smoke.sh`. Thêm `deploy/` vào vùng bảo vệ (`PROTECTED` trong `runner/kit.py` và `_common.py`) để agent không sửa.
+2. **Staging tự động:** sau khi epic `done`, chạy `deploy/staging.sh` rồi `deploy/smoke.sh`; smoke FAIL thì mở bug như kiểm thử epic.
+3. **Production luôn cần người duyệt:** một lệnh riêng (ví dụ `kit.py release <epic>`) chỉ chạy khi bạn gọi, in release notes từ các task/REQ đã xong, hỏi xác nhận, rồi mới deploy. Không cho agent tự gọi lệnh này (thêm vào `guard_bash.py`).
+4. **Theo dõi sau deploy:** lỗi production đưa vào GitHub Issue nhãn `bug,agent-ready` → `kit.py import` → bug-triager, cùng luồng bug hiện có.
+5. **Trạng thái:** có thể thêm `staged`, `released` sau `done`, ghi trên nhánh `agent-kit/log` giống các trạng thái khác (mỗi máy chỉ ghi file của mình).
+
 ---
 
 ## 3. Bản đồ file
@@ -154,7 +190,9 @@ your-project/
 │   └── decisions/0000-template.md  Mẫu ghi quyết định kiến trúc (ADR)
 ├── design/
 │   ├── README.md                   Hướng dẫn đặt file design
-│   └── <feature>/                  spec.md + file export từ Claude Design
+│   ├── _IDEA_TEMPLATE.md           (tuỳ chọn) Mẫu ghi ý tưởng
+│   ├── _PRD_TEMPLATE.md            (tuỳ chọn) Mẫu PRD có mã REQ-xx
+│   └── <feature>/                  idea.md, prd.md (tuỳ chọn) hoặc spec.md + file export từ Claude Design
 ├── tasks/
 │   ├── _TEMPLATE.md                Mẫu một task
 │   └── <feature>/                  EPIC.md + các task (planner sinh, bạn duyệt)
@@ -175,6 +213,7 @@ your-project/
 │   │   └── stop_checks.py          Không cho worker dừng khi checks.sh chưa pass
 │   ├── agents/                     Mỗi công việc một file, agent chủ spawn theo tên
 │   │   ├── context-writer.md       Codebase → đề xuất bối cảnh (CLAUDE.md, architecture, checks)
+│   │   ├── product-analyst.md      (tuỳ chọn) Ý tưởng → PRD có mã yêu cầu
 │   │   ├── planner.md              Design → epic + tasks
 │   │   ├── bug-triager.md          Bug report → task bug nháp
 │   │   ├── test-writer.md          Task → bài test ẩn
@@ -196,7 +235,9 @@ your-project/
 | `docs/architecture.md` | Người | Module nào làm gì, dữ liệu chạy qua đâu, chỗ nào nguy hiểm. Giúp AI sửa đúng chỗ. |
 | `docs/conventions.md` | Người | Quy tắc code mà **chưa** biến được thành check tự động. Mỗi dòng ghi rõ đã tự động hoá chưa. |
 | `docs/decisions/` | Người | Lý do các quyết định đã chốt, để AI không "sáng tạo" ngược lại. |
-| `design/<feature>/spec.md` | Người | Mục tiêu, người dùng, luồng chính, ràng buộc, điều KHÔNG làm. |
+| `design/<feature>/idea.md` | Người (tuỳ chọn) | Ý tưởng thô, đầu vào cho product-analyst. |
+| `design/<feature>/prd.md` | product-analyst viết, người sửa và duyệt (tuỳ chọn) | Yêu cầu có mã `REQ-01`... kèm cách kiểm chứng. Task trỏ về các mã này để truy vết. |
+| `design/<feature>/spec.md` | Người | Dùng thay PRD khi muốn tiết kiệm token: mục tiêu, người dùng, luồng chính, ràng buộc, điều KHÔNG làm. |
 | `design/<feature>/*.pdf/png/html` | Người | Export từ Claude Design. Planner đọc được ảnh và PDF. |
 | `tasks/_TEMPLATE.md` | Người | Định dạng chuẩn của một task. Planner bám theo. |
 | `tasks/<feature>/*.md` | Planner sinh, người duyệt | Spec của từng task: mục tiêu, interface, acceptance. |
@@ -355,11 +396,20 @@ Tối thiểu cần chỉnh: `BASE_BRANCH`, `CLAUDE_BIN`, `HOLDOUT_DIR`, `HOLDOU
 
 ## 6. Quy trình hằng ngày
 
+### Bước 0 — (Tuỳ chọn) Ý tưởng → PRD
+
+```bash
+mkdir -p design/<feature> && cp design/_IDEA_TEMPLATE.md design/<feature>/idea.md   # viết ý tưởng
+python3 runner/kit.py idea design/<feature>      # product-analyst viết design/<feature>/prd.md (draft)
+# đọc prd.md: trả lời Câu hỏi mở, sửa yêu cầu REQ-xx và mục Kiểm chứng cho đúng ý
+python3 runner/kit.py approve design/<feature>   # duyệt PRD (không gọi AI)
+```
+Bỏ qua bước này nếu muốn tiết kiệm token: viết thẳng `spec.md` ở Bước 1.
+
 ### Bước 1 — Design
 
-1. Làm design trên Claude Design.
-2. Export ra PDF/PNG/HTML, bỏ vào `design/<feature>/`.
-3. Viết `design/<feature>/spec.md`: mục tiêu, người dùng, luồng chính, ràng buộc, **điều KHÔNG làm**.
+1. (Tuỳ chọn) Làm design trên Claude Design, export PDF/PNG/HTML vào `design/<feature>/`.
+2. Nếu không dùng PRD: viết `design/<feature>/spec.md`: mục tiêu, người dùng, luồng chính, ràng buộc, **điều KHÔNG làm**.
 
 ### Bước 2 — Chia việc
 
@@ -367,7 +417,11 @@ Tối thiểu cần chỉnh: `BASE_BRANCH`, `CLAUDE_BIN`, `HOLDOUT_DIR`, `HOLDOU
 python3 runner/kit.py plan design/<feature>
 ```
 
-Planner tạo `tasks/<feature>/EPIC.md` và các file task `<FEAT>-01.md`, `<FEAT>-02.md`, ... với `status: draft`.
+Planner tạo `tasks/<feature>/EPIC.md` và các file task `<FEAT>-01.md`, `<FEAT>-02.md`, ... với `status: draft`. Có PRD đã duyệt thì mỗi task ghi `requirements: [REQ-..]`; PRD chưa duyệt thì `plan` từ chối.
+
+```bash
+python3 runner/kit.py trace design/<feature>     # REQ nào chưa có task, REQ nào đã xong (chỉ đọc)
+```
 
 ### Bước 3 — Bạn duyệt nháp (bước quan trọng nhất)
 
@@ -405,10 +459,11 @@ Với `AGENT=claude`/`cli`: `kit.py work` tự chạy hết. Với `AGENT=chat`:
 1. `git pull --ff-only` để nhận task mới duyệt (thất bại → dừng và báo).
 2. Lấy khoá `lock.json` trên nhánh `agent-kit/log` (máy khác đang chạy → dừng).
 3. `sync` trạng thái từ mọi máy và GitHub.
-4. Chọn tối đa `MAX_TASKS` task sẵn sàng, theo `priority`.
-5. Với từng task: test-writer (nếu cần) → implementer → checks → test ẩn → reviewer → push nhánh → PR (PASS) hoặc thử lại (FAIL). Sau mỗi task, trạng thái và log được đẩy lên nhánh `agent-kit/log`, nên máy khác thấy tiến độ ngay cả khi phiên chưa xong.
-6. Dừng sớm nếu chạm giới hạn gói Pro; task dở được trả về hàng đợi cho phiên sau.
-7. Ghi tóm tắt, nhả khoá, gửi Telegram.
+4. **Kiểm thử cấp epic** cho mọi epic đã merge đủ task (trạng thái `verify`): test-writer viết kiểm thử end-to-end nếu epic có `holdout: true` (một lần), rồi chạy `checks.sh` + kiểm thử đó trên nhánh gốc. PASS → epic `done`. FAIL → epic `failed`, và nếu `GH_SYNC=1` thì mở GitHub Issue nhãn `bug,agent-ready` kèm log; `kit.py import` → bug-triager viết task sửa với `epic: <mã epic>`; khi task sửa merge, epic tự quay lại `verify`.
+5. Chọn tối đa `MAX_TASKS` task sẵn sàng, theo `priority`.
+6. Với từng task: test-writer (nếu cần) → implementer → checks → test ẩn → reviewer → push nhánh → PR (PASS) hoặc thử lại (FAIL). Sau mỗi task, trạng thái và log được đẩy lên nhánh `agent-kit/log`, nên máy khác thấy tiến độ ngay cả khi phiên chưa xong.
+7. Dừng sớm nếu chạm giới hạn gói Pro; task dở được trả về hàng đợi cho phiên sau.
+8. Ghi tóm tắt, nhả khoá, gửi Telegram.
 
 ### Bước 6 — Kiểm tra (bất kỳ máy nào, bất kỳ lúc nào)
 
@@ -482,10 +537,12 @@ Chạy từ thư mục gốc project: `python3 runner/kit.py <lệnh>`
 | `report [--last N]` | Tóm tắt N lượt chạy gần nhất của mọi máy (mặc định 3) |
 | `report --task <id> [--last N]` | Chi tiết một task qua các lượt: PASS/FAIL, lý do, nhánh, commit gốc, mã spec, reviewer, báo cáo worker, đuôi log checks/test ẩn/worker |
 | `doctor` | Kiểm tra toàn bộ. Trả mã thoát 1 nếu có lỗi (✗), dùng được trong script |
+| `trace [design/<feature>] [--offline]` | Yêu cầu → task → trạng thái: REQ nào chưa có task, bao nhiêu REQ đã xong, epic đang ở đâu |
 
 `doctor` kiểm tra:
 - **Cài đặt:** `config.env`, phiên bản `claude`, `gh` đăng nhập, khung đã commit, `checks.sh` đã cấu hình, có remote.
 - **Đồng bộ:** đọc được nhánh log; máy này chậm/nhanh hơn `origin/<BASE_BRANCH>`; `tasks/` có thay đổi chưa commit; phiên cuối của từng máy (cảnh báo nếu đặt `STALE_RUN_HOURS` và đã quá — lịch tự động có còn chạy?); khoá đang giữ hay đã chết.
+- **Yêu cầu (nếu dùng PRD):** PRD chưa duyệt, REQ chưa có task, task trỏ tới REQ không tồn tại.
 - **Tasks:** frontmatter hỏng, id trùng, `depends_on` trỏ tới task không tồn tại, vòng phụ thuộc, task đã duyệt mà Acceptance trống hoặc chưa có issue, thiếu test ẩn.
 - **Trạng thái chạy:** task kẹt `running`, spec bị sửa sau khi agent chạy, task `failed`, nhánh lần thử không có trên origin, PR đã merge/đóng mà chưa `sync`.
 
@@ -493,11 +550,14 @@ Chạy từ thư mục gốc project: `python3 runner/kit.py <lệnh>`
 
 | Lệnh | Tác dụng | Gọi Claude? |
 |---|---|---|
-| `plan design/<feature>` | Planner đọc design → sinh epic + tasks nháp vào `tasks/<feature>/`. Chế độ chat → in prompt để dán vào Copilot Chat | 1 lần (hoặc không) |
+| `idea design/<feature>` | (Tuỳ chọn) product-analyst: `idea.md` → `prd.md` có mã REQ-xx. Chế độ chat → in prompt | 1 lần |
+| `approve design/<feature>` | Duyệt PRD (cần ít nhất một REQ) | Không |
+| `plan design/<feature>` | Planner đọc PRD/spec + design → sinh epic + tasks nháp vào `tasks/<feature>/`, mỗi task ghi REQ. PRD có mà chưa duyệt → từ chối. Chế độ chat → in prompt | 1 lần |
+| `approve <id\|epic\|all>` (task) | Xem bảng dưới | |
 | `approve <id\|epic\|all>` | Duyệt nháp → GitHub Issue | Không |
 | `work [--max N] [--task ID]` | Phiên làm việc: làm các task sẵn sàng (tối đa N, mặc định `MAX_TASKS`). Chế độ chat: mỗi lần chạy làm một bước, in bước tiếp theo | 2 lần/task (implementer + reviewer), +1 nếu cần viết test ẩn |
 | `work --abort` | (chế độ chat) Huỷ task đang làm dở, về nhánh gốc, không tính lượt thử | Không |
-| `sync` | Gộp trạng thái mọi máy; nhãn GitHub sửa tay; PR merged → `done`, đóng → `failed`; epic xong khi mọi task xong; chia sẻ kết quả | Không |
+| `sync` | Gộp trạng thái mọi máy; nhãn GitHub sửa tay; PR merged → `done`, đóng → `failed`; epic có đủ task `done` → `verify`; chia sẻ kết quả | Không |
 | `set <id> <status>` | Đổi trạng thái tay, ví dụ `failed` → `queued` để chạy lại (đặt lại số lần thử) | Không |
 | `doctor --fix` | Đưa task kẹt `running` về `queued`, rồi `sync` | Không |
 | `import` | Issue nhãn `agent-ready` → task nháp trong `tasks/imported/` | Không |
@@ -511,6 +571,7 @@ type: task            # epic | task | bug
 epic: FEAT
 status: draft         # draft | approved — chỉ người đổi (qua approve)
 depends_on: []        # ví dụ [FEAT-01, FEAT-02]
+requirements: []      # (tuỳ chọn) mã REQ trong PRD mà task phục vụ
 priority: 2           # 1 = làm trước
 holdout: true         # có viết test ẩn không
 design: design/feat
@@ -560,9 +621,10 @@ Lưu ý bảo mật: log của worker được đẩy lên nhánh `agent-kit/log
 | `AGENT` | `auto` | `claude` / `cli` / `chat` / `auto` (mục 2.5) |
 | `AGENT_CMD` | trống | (AGENT=cli) Lệnh gọi agent CLI. `{prompt}` được thay bằng prompt; không có `{prompt}` thì prompt đi qua stdin |
 | `CLAUDE_BIN` | `claude` | (AGENT=claude) Đường dẫn tới Claude Code. Dùng đường dẫn tuyệt đối khi chạy theo lịch |
-| `HOLDOUT_DIR` | trống | Thư mục test ẩn, **ngoài repo**. Trống = tắt test ẩn |
+| `HOLDOUT_DIR` | `~/.agent-holdout/<project>` | Thư mục test ẩn, **ngoài repo** |
 | `HOLDOUT_CMD` | trống | Lệnh chạy test ẩn trong worktree, ví dụ `pytest -q tests` |
-| `REVIEW` | `1` | Bật reviewer độc lập |
+| `EPIC_TEST_CMD` | trống | Lệnh chạy kiểm thử end-to-end cấp epic. Trống = dùng `HOLDOUT_CMD` |
+| `REQUIRE_PRD` | `0` | `1` = `plan` bắt buộc có PRD đã duyệt |
 | `GH_SYNC` | `0` trong code, `1` trong file mẫu | Dùng GitHub Issue + PR qua `gh` |
 | `GIT_PULL` | `1` | `git pull --ff-only` đầu mỗi phiên `work`. Thất bại hoặc có thay đổi chưa commit → dừng, không chạy spec cũ |
 | `PUBLISH` | `1` | Đẩy trạng thái, log và nhánh mọi lần thử lên origin để máy khác kiểm tra |
@@ -641,7 +703,8 @@ Chạy lại `install.py` vào repo mới, điền 4 file ở mục 5. Mọi th�
 |---|---|---|
 | agent chủ | Điều phối, không tự làm việc của agent con | `docs/orchestration.md` |
 | `context-writer` | Đề xuất bối cảnh vào `.agent-kit/proposals/` | `.claude/agents/context-writer.md` |
-| `planner` | Design → epic + tasks nháp trong `tasks/<feature>/` | `.claude/agents/planner.md` |
+| `product-analyst` | Ý tưởng → `design/<feature>/prd.md` (draft) | `.claude/agents/product-analyst.md` |
+| `planner` | PRD/spec + design → epic + tasks nháp trong `tasks/<feature>/`, ghi `requirements:` | `.claude/agents/planner.md` |
 | `bug-triager` | Bug report → task nháp trong `tasks/bugs/` | `.claude/agents/bug-triager.md` |
 | `test-writer` | Test ẩn vào `.agent-kit/holdout-staging/<task-id>/` | `.claude/agents/test-writer.md` |
 | `implementer` (= `worker`) | Làm một task, tự chấm, commit, báo cáo | `.claude/agents/implementer.md` |

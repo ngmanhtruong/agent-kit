@@ -9,6 +9,7 @@ Mỗi agent con được định nghĩa trong `.claude/agents/<tên>.md`. Spawn 
 | Agent | Dùng khi | Đầu vào bạn phải đưa | Đầu ra | Được ghi vào |
 |---|---|---|---|---|
 | `context-writer` | Project mới cài kit; người dùng chưa biết điền `CLAUDE.md`, `architecture.md`, `checks.sh` | Không cần (nó tự quét repo) | Bản đề xuất 3 file | `.agent-kit/proposals/` |
+| `product-analyst` | (Tuỳ chọn) Có ý tưởng mới trong `design/<feature>/idea.md` cần thành PRD | Đường dẫn thư mục | `design/<feature>/prd.md` (`draft`) | `design/` |
 | `planner` | Có design mới trong `design/<feature>/` cần chia việc | Đường dẫn thư mục design | `tasks/<feature>/EPIC.md` + các task `draft` | `tasks/` |
 | `bug-triager` | Có bug report (mô tả, log, issue) cần thành task | Nội dung bug, số issue nếu có | Một task `type: bug` dạng `draft` | `tasks/` |
 | `test-writer` | Task đã duyệt có `holdout: true` | Đường dẫn file task | Bài test ẩn | `.agent-kit/holdout-staging/` |
@@ -22,7 +23,9 @@ Quyền ghi được hook ép theo tên agent (`.claude/hooks/_common.py` → `R
 | Người dùng nói | Bạn làm |
 |---|---|
 | "Mới cài kit, điền giúp bối cảnh" / "không biết viết CLAUDE.md" | `context-writer` → trình bày đề xuất → người dùng đồng ý → **người dùng** chép vào (hoặc mở lại Claude với `AGENT_KIT_UNLOCK=1`) |
-| "Chia design X thành task" | `planner` → tóm tắt danh sách task + **câu hỏi mở** cho người dùng |
+| "Có ý tưởng X" / "viết PRD" | (Tuỳ chọn, tốn token) `product-analyst` → tóm tắt yêu cầu + **câu hỏi mở**; người dùng duyệt bằng `kit.py approve design/X` |
+| "Chia design X thành task" | `planner` → tóm tắt danh sách task + **câu hỏi mở** cho người dùng; nếu có PRD, chạy `kit.py trace design/X` để kiểm tra mọi REQ đều có task |
+| "Yêu cầu nào xong rồi?" | Chạy `python3 runner/kit.py trace` (chỉ đọc), tóm tắt |
 | "Có bug này…" / dán log lỗi | `bug-triager` → trình bày task bug nháp |
 | "Làm task FEAT-01" | Kiểm tra task đã `approved` → `implementer` → `reviewer` → báo kết quả |
 | "Chấm lại nhánh X" | `reviewer` |

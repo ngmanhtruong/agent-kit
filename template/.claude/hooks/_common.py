@@ -12,6 +12,7 @@ ROLE = os.environ.get("AGENT_KIT_ROLE", "worker")
 
 # Roles that may ONLY write inside these prefixes. Everything else is denied.
 ROLE_WRITE_ONLY = {
+    "product-analyst": ["design/"],
     "planner": ["tasks/"],
     "bug-triager": ["tasks/bugs/"],
     "test-writer": [".agent-kit/holdout-staging/"],
