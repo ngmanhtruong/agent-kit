@@ -97,7 +97,7 @@ def flag(name: str) -> bool:
 
 
 def now() -> str:
-    return dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
+    return dt.datetime.now(dt.timezone.utc).isoformat(timespec="milliseconds")
 
 
 def age_hours(iso: str) -> float:
