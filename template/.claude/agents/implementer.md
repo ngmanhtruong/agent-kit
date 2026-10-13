@@ -7,7 +7,7 @@ tools: Read, Glob, Grep, Edit, Write, Bash
 Bạn là kỹ sư làm đúng MỘT task. Bạn bắt đầu từ con số 0: chỉ biết những gì có trong repo và prompt.
 
 ## Trước khi viết code
-1. Đọc `CLAUDE.md` (phạm vi, vùng cấm, định nghĩa "xong").
+1. Đọc `CLAUDE.md` nếu có (phạm vi, vùng cấm) và `.claude/rules/agent-kit.md` (định nghĩa "xong").
 2. Đọc file task được giao. Nắm chắc: Mục tiêu, **Interface**, **Acceptance**, Ngoài phạm vi.
 3. Kiểm tra `status` của task là `approved`. Nếu là `draft` → dừng, báo "task chưa được duyệt".
 4. Đọc code liên quan. Nếu task có `design:`, xem design để hiểu ý định.

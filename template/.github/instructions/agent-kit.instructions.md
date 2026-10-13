@@ -1,10 +1,14 @@
-# Hướng dẫn cho GitHub Copilot
+---
+applyTo: "**"
+---
+# Hướng dẫn cho GitHub Copilot (agent-kit)
 
 Repo này dùng **agent-kit**. Toàn bộ bối cảnh và quy tắc viết cho mọi AI agent, không riêng Claude. Đọc theo thứ tự:
 
-1. `CLAUDE.md` — sản phẩm làm gì, được/cấm đụng đâu, thế nào là "xong".
-2. `docs/architecture.md` — các bộ phận, chỗ nguy hiểm.
-3. `docs/orchestration.md` — chọn đúng vai trò cho từng loại việc.
+1. `CLAUDE.md` (nếu project có) — sản phẩm làm gì, được/cấm đụng đâu.
+2. `.claude/rules/agent-kit.md` — thế nào là "xong", khi không chắc thì làm gì.
+3. `docs/architecture.md` — các bộ phận, chỗ nguy hiểm.
+4. `docs/orchestration.md` — chọn đúng vai trò cho từng loại việc.
 
 ## Vai trò
 

@@ -182,7 +182,7 @@ Sau khi cài vào project, repo của bạn có thêm:
 
 ```
 your-project/
-├── CLAUDE.md                     ★ Bản đồ dự án cho AI (bạn điền)
+├── CLAUDE.md                     ★ Bản đồ dự án cho AI (của bạn; kit chỉ tạo bản khởi đầu nếu chưa có, không bao giờ sửa)
 ├── docs/
 │   ├── architecture.md           ★ Sơ đồ các bộ phận (bạn điền)
 │   ├── orchestration.md            Hướng dẫn agent chủ: khi nào spawn agent con nào
@@ -203,8 +203,11 @@ your-project/
 │   ├── config.env.example          Mẫu cấu hình
 │   └── config.env                ★ Cấu hình riêng từng máy (bạn điền, KHÔNG commit)
 ├── .github/
-│   └── copilot-instructions.md     Dặn Copilot đọc CLAUDE.md + orchestration và tự giữ quy tắc
+│   └── instructions/
+│       └── agent-kit.instructions.md   Dặn Copilot đọc CLAUDE.md + quy tắc kit + orchestration, tự giữ quy tắc (applyTo: **, không đè file của bạn)
 ├── .claude/
+│   ├── rules/
+│   │   └── agent-kit.md            Quy tắc của kit (định nghĩa "xong", nạp orchestration). Claude Code tự nạp
 │   ├── settings.json               Permissions + đăng ký hooks
 │   ├── hooks/
 │   │   ├── _common.py              Vùng bảo vệ, vai trò, tiện ích chung
@@ -231,7 +234,8 @@ your-project/
 
 | File | Ai sửa | Tác dụng |
 |---|---|---|
-| `CLAUDE.md` | Người | Claude Code tự đọc file này đầu mỗi phiên. Nói AI biết sản phẩm làm gì, được/cấm đụng đâu, thế nào là "xong". |
+| `CLAUDE.md` | Người | **File của project bạn**, kit không ghi đè. Claude Code đọc đầu mỗi phiên: sản phẩm làm gì, được/cấm đụng đâu. Chưa có thì installer tạo bản khởi đầu từ `starter/CLAUDE.md`. |
+| `.claude/rules/agent-kit.md` | Người | Quy tắc của kit, Claude Code tự nạp (`.claude/rules/`, cùng mức ưu tiên với CLAUDE.md): định nghĩa "xong", khi không chắc, nạp `docs/architecture.md` + `docs/orchestration.md`. Tách riêng để không trùng với `CLAUDE.md` có sẵn của project. |
 | `docs/architecture.md` | Người | Module nào làm gì, dữ liệu chạy qua đâu, chỗ nào nguy hiểm. Giúp AI sửa đúng chỗ. |
 | `docs/conventions.md` | Người | Quy tắc code mà **chưa** biến được thành check tự động. Mỗi dòng ghi rõ đã tự động hoá chưa. |
 | `docs/decisions/` | Người | Lý do các quyết định đã chốt, để AI không "sáng tạo" ngược lại. |
@@ -246,7 +250,7 @@ your-project/
 | `runner/config.env` | Người, từng máy | Số task mỗi phiên, đường dẫn `claude`, test ẩn, GitHub, Telegram. |
 | `.claude/settings.json` | Người | Danh sách lệnh được phép/cấm và đăng ký hooks. |
 | `.claude/hooks/*.py` | Người | Rào cứng. Chạy tự động trước mỗi lệnh/ghi file và khi agent dừng. |
-| `docs/orchestration.md` | Người | Sổ tay của agent chủ: bảng agent con, chọn agent theo yêu cầu, quy tắc điều phối, mẫu prompt khi spawn. Được nạp sẵn qua `CLAUDE.md`. |
+| `docs/orchestration.md` | Người | Sổ tay của agent chủ: bảng agent con, chọn agent theo yêu cầu, quy tắc điều phối, mẫu prompt khi spawn. Được nạp sẵn qua `.claude/rules/agent-kit.md`. |
 | `.claude/agents/*.md` | Người | Mỗi file là hướng dẫn cho một công việc (context-writer, planner, bug-triager, test-writer, implementer, reviewer): nhiệm vụ, công cụ, đầu vào, đầu ra. |
 | `.claude/skills/*` | Người | Quy trình chuẩn agent gọi theo tên. |
 
@@ -284,7 +288,7 @@ python3 agent-kit/install.py ~/code/my-project
 
 Installer **không ghi đè** file của bạn:
 - File chưa có → chép vào.
-- `CLAUDE.md` đã có → tạo `CLAUDE.agent-kit.md`, bạn tự gộp mục 5–6 vào `CLAUDE.md`.
+- `CLAUDE.md` của bạn **không bao giờ bị đụng** (kit chỉ dùng `.claude/rules/agent-kit.md`, Claude Code tự nạp). Chưa có `CLAUDE.md` thì tạo bản khởi đầu (mục 1–4 để điền).
 - `.claude/settings.json` đã có → tự gộp permissions và hooks, giữ nguyên phần của bạn.
 - Thêm `.agent-kit/` và `runner/config.env` vào `.gitignore`.
 - Tạo `runner/config.env` từ file mẫu.
@@ -323,13 +327,13 @@ Khi chạy theo lịch, PATH rất ngắn nên đặt `CLAUDE_BIN` trong `config
 
 **Cách nhanh:** mở agent (Claude Code, Copilot Chat...) trong project và nói *"dùng context-writer để đề xuất bối cảnh cho project này"*. Agent con `context-writer` quét code, chạy thử lệnh test, rồi ghi bản đề xuất `CLAUDE.md`, `architecture.md`, `checks.sh` vào `.agent-kit/proposals/`, kèm các câu hỏi cần bạn xác nhận. Bạn đọc, sửa, rồi chép vào chỗ thật (hoặc khởi động `AGENT_KIT_UNLOCK=1 claude` và nhờ agent chép). Dưới đây là cách tự điền.
 
-Mục 7 của `CLAUDE.md` (`@docs/architecture.md`, `@docs/orchestration.md`) làm Claude Code nạp luôn hai file đó vào mọi phiên. Giữ nguyên.
+`.claude/rules/agent-kit.md` (`@../../docs/architecture.md`, `@../../docs/orchestration.md`) làm Claude Code nạp luôn hai file đó vào mọi phiên. Giữ nguyên.
 
 ### 5.1 `CLAUDE.md` — bản đồ cho AI
 
-**Tác dụng:** Claude Code đọc file này đầu tiên mỗi phiên. Không có nó, AI phải tự đoán dự án làm gì.
+**Tác dụng:** Claude Code đọc file này đầu tiên mỗi phiên. Không có nó, AI phải tự đoán dự án làm gì. Project đã có `CLAUDE.md` thì chỉ cần bảo đảm nó có mục **Phạm vi** (được làm / KHÔNG được đụng); quy tắc của kit đã nằm ở `.claude/rules/agent-kit.md`.
 
-**Điền mục 1–4** (mục 5–6 đã viết sẵn, giữ nguyên):
+**Điền mục 1–4:**
 
 ```markdown
 ## 1. Sản phẩm này để làm gì
@@ -717,7 +721,7 @@ Chạy lại `install.py` vào repo mới, điền 4 file ở mục 5. Mọi th�
 
 ### 10.2 Thứ tự đọc khi bắt đầu
 
-1. `CLAUDE.md`: mục đích, phạm vi, định nghĩa "xong".
+1. `CLAUDE.md` (nếu có): mục đích, phạm vi. Rồi `.claude/rules/agent-kit.md`: định nghĩa "xong".
 2. `docs/architecture.md`: các bộ phận, chỗ nguy hiểm.
 3. File task được giao (runner dán nguyên văn vào prompt).
 4. `docs/conventions.md`, `docs/decisions/` nếu task chạm vào phần liên quan.

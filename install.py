@@ -4,7 +4,8 @@
     python3 install.py /đường/dẫn/tới/repo
 
 - File chưa có → chép vào.
-- CLAUDE.md đã có → ghi CLAUDE.agent-kit.md để bạn tự gộp.
+- CLAUDE.md của bạn không bao giờ bị đụng. Quy tắc của kit nằm ở .claude/rules/agent-kit.md (tự được nạp).
+  Chưa có CLAUDE.md → tạo bản khởi đầu từ starter/CLAUDE.md.
 - .claude/settings.json đã có → tự gộp permissions + hooks (giữ nguyên của bạn).
 - Thêm .agent-kit/, runner/config.env, __pycache__/ vào .gitignore.
 """
@@ -16,6 +17,7 @@ import sys
 from pathlib import Path
 
 SRC = Path(__file__).resolve().parent / "template"
+STARTER = Path(__file__).resolve().parent / "starter"
 
 
 def merge_settings(dst: Path, src: Path) -> None:
@@ -52,15 +54,17 @@ def main() -> None:
             notes.append("đã gộp .claude/settings.json")
             continue
         if dst.exists():
-            if rel.as_posix() == "CLAUDE.md":
-                shutil.copy2(f, repo / "CLAUDE.agent-kit.md")
-                notes.append("CLAUDE.md đã có → xem CLAUDE.agent-kit.md và gộp mục 5-6 vào")
-            else:
-                notes.append(f"giữ nguyên (đã có): {rel}")
+            notes.append(f"giữ nguyên (đã có): {rel}")
             continue
         shutil.copy2(f, dst)
         if f.suffix in (".py", ".sh"):
             dst.chmod(dst.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP)
+
+    if (repo / "CLAUDE.md").exists():
+        notes.append("CLAUDE.md của bạn giữ nguyên; điền bối cảnh còn thiếu (phạm vi được/cấm đụng) vào đó")
+    else:
+        shutil.copy2(STARTER / "CLAUDE.md", repo / "CLAUDE.md")
+        notes.append("tạo CLAUDE.md khởi đầu — điền mục 1-4 (hoặc nhờ agent con context-writer đề xuất)")
 
     cfg = repo / "runner" / "config.env"
     if not cfg.exists():
@@ -82,7 +86,7 @@ def main() -> None:
     v = subprocess.run(["claude", "--version"], capture_output=True, text=True) if shutil.which("claude") else None
     if v:
         print(f"  claude: {v.stdout.strip()} (cần bản hỗ trợ hook onFailure và --permission-prompts)")
-    print("\nTiếp theo: xem README.md, mục 'Bắt đầu'.")
+    print("\nTiếp theo: chạy `python3 runner/kit.py` (menu) hoặc `kit.py doctor`; hướng dẫn đầy đủ: README.md của repo agent-kit.")
 
 
 if __name__ == "__main__":

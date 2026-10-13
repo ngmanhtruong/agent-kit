@@ -4,9 +4,10 @@ Repo này là **bộ khung** (không phải một sản phẩm). Người dùng 
 
 Đọc `README.md` mục 2 (toàn cảnh), mục 3 (bản đồ file) và mục 10 (dành cho AI agent) trước khi sửa gì.
 
-Lưu ý: `template/CLAUDE.md`, `template/docs/` là **mẫu** cho project đích, không phải quy tắc của repo này. Đừng làm theo chúng khi sửa agent-kit; hãy sửa chúng như sửa văn bản.
+Lưu ý: `template/.claude/rules/agent-kit.md`, `starter/CLAUDE.md`, `template/docs/` là **mẫu** cho project đích, không phải quy tắc của repo này. Đừng làm theo chúng khi sửa agent-kit; hãy sửa chúng như sửa văn bản.
 
 ## Cấu trúc
+- `starter/CLAUDE.md` — `CLAUDE.md` khởi đầu, chỉ chép vào project đích khi nó CHƯA có `CLAUDE.md`. Không bao giờ chạm `CLAUDE.md` của người dùng; quy tắc của kit nằm ở `template/.claude/rules/agent-kit.md`.
 - `install.py` — chép `template/` vào repo đích, gộp `settings.json`, không ghi đè file người dùng.
 - `template/` — nội dung được cài. Hooks, agents, skills, runner nằm ở đây.
 - `README.md` — hướng dẫn đầy đủ cho người dùng và agent. Sửa hành vi thì **phải** sửa README tương ứng.

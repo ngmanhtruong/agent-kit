@@ -1,6 +1,6 @@
 # Điều phối agent (dành cho agent chủ)
 
-> File này được nạp vào mọi phiên qua `CLAUDE.md`. Nếu bạn là phiên Claude Code mà người dùng đang nói chuyện trực tiếp, **bạn là agent chủ**: bạn không tự làm mọi việc, bạn giao việc cho đúng agent con, kiểm tra đầu ra, rồi báo lại người dùng.
+> File này được nạp vào mọi phiên qua `.claude/rules/agent-kit.md`. Nếu bạn là phiên Claude Code mà người dùng đang nói chuyện trực tiếp, **bạn là agent chủ**: bạn không tự làm mọi việc, bạn giao việc cho đúng agent con, kiểm tra đầu ra, rồi báo lại người dùng.
 
 ## 1. Danh sách agent con
 

@@ -18,7 +18,7 @@ Kiểm tra (chỉ đọc — an toàn chạy trên bất kỳ máy nào, bất k
   python3 runner/kit.py doctor                   kiểm tra toàn bộ: cài đặt, agent, tasks, đồng bộ
 
 Vòng đời: ý tưởng → PRD (REQ-xx) → design → epic/task → work (chấm từng task) → PR → merge
-          → kiểm thử cấp epic → done. Deploy/staging/production: tự bổ sung (xem README).
+          → kiểm thử cấp epic → done. Deploy/staging/production: tự bổ sung (xem README của agent-kit).
 
 Làm việc:
   python3 runner/kit.py idea design/<feature>    product-analyst: idea.md → prd.md (yêu cầu có mã REQ-xx)
@@ -1138,7 +1138,7 @@ def cmd_import(_args):
 # Paths an implementer must never change. Checked here on the final diff, so the
 # rule holds for every agent — not only for Claude Code, whose hooks also block it.
 PROTECTED = ["eval/", ".claude/", "tasks/", "runner/", "design/", "docs/", "CLAUDE.md",
-             ".github/copilot-instructions.md", ".env"]
+             ".github/copilot-instructions.md", ".github/instructions/", ".env"]
 
 
 def is_protected(path: str) -> bool:
@@ -1183,7 +1183,7 @@ def run_holdout(t, wd: Path, log: Path, cmd: str = ""):
 
 def implementer_prompt(t: dict, branch: str, prev: str) -> str:
     tid = str(t["id"])
-    return (f"Bạn đang làm task `{tid}` trên nhánh `{branch}`. Đọc `CLAUDE.md` trước.\n\n"
+    return (f"Bạn đang làm task `{tid}` trên nhánh `{branch}`. Đọc `CLAUDE.md` (nếu có) và `.claude/rules/agent-kit.md` trước.\n\n"
             f"=== TASK ===\n{t['_path'].read_text()}\n=== HẾT TASK ===\n\n"
             + (f"Lần thử trước bị chấm FAIL vì:\n{prev}\nĐừng lặp lại.\n\n" if prev else "")
             + f"Khi xong, làm theo skill `finish-task` (`.claude/skills/finish-task/SKILL.md`). "

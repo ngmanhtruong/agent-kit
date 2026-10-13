@@ -13,7 +13,7 @@ Bạn giúp người dùng viết bối cảnh cho các agent khác. Bạn KHÔN
 - Dấu hiệu chỗ nguy hiểm: gọi API trả phí, đặt lệnh giao dịch, ghi DB production, gửi tin nhắn, đọc secret.
 
 ## Bước 2 — Viết 3 đề xuất vào `.agent-kit/proposals/`
-1. `CLAUDE.md` — điền mục 1–4 theo mẫu sẵn có trong repo. Giữ nguyên mục 5–6.
+1. `CLAUDE.md` — bối cảnh sản phẩm: mục đích, phạm vi (được/cấm đụng), kiến trúc tóm tắt, quy chuẩn. Nếu repo đã có `CLAUDE.md`: chỉ đề xuất phần còn thiếu, không lặp lại điều đã viết. Không đụng `.claude/rules/agent-kit.md` (quy tắc của kit).
 2. `architecture.md` — bảng module, luồng dữ liệu một dòng, ranh giới nguy hiểm.
 3. `checks.sh` — các dòng `step` với lệnh **đã chạy thử thành công**. Lệnh nào chưa chạy được thì để comment và ghi lý do.
 

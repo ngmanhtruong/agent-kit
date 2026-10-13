@@ -5,6 +5,7 @@
       "Bash(python3 runner/kit.py status*)",
       "Bash(python3 runner/kit.py report*)",
       "Bash(python3 runner/kit.py doctor)",
+      "Bash(python3 runner/kit.py menu*)",
       "Bash(git status *)",
       "Bash(git diff *)",
       "Bash(git log *)",
