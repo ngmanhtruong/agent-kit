@@ -10,7 +10,8 @@ Kiểm tra (chỉ đọc — an toàn chạy trên bất kỳ máy nào, bất k
 Làm việc:
   python3 runner/kit.py plan design/<feature>    planner chia design thành tasks nháp
   python3 runner/kit.py approve <id|epic|all>    duyệt nháp → GitHub Issue (không cần Claude)
-  python3 runner/kit.py night [--max N]          chạy các task sẵn sàng (cron)
+  python3 runner/kit.py run [--max N]            một phiên làm việc: chạy các task sẵn sàng
+                                                 (lúc nào, máy nào có Claude Code cũng được; `night` là tên cũ)
   python3 runner/kit.py sync                     PR merged → done; cập nhật và chia sẻ trạng thái
   python3 runner/kit.py import                   GitHub Issue nhãn 'agent-ready' → task nháp
   python3 runner/kit.py set <id> <status>        đổi trạng thái tay (vd: failed → queued)
@@ -54,7 +55,7 @@ def load_config() -> dict:
         "HOLDOUT_DIR": "", "HOLDOUT_CMD": "", "REVIEW": "1",
         "GH_SYNC": "0", "GIT_PULL": "1", "PUBLISH": "1",
         "LOG_BRANCH": "agent-kit/log", "MACHINE_NAME": "", "LOCK_HOURS": "12",
-        "STALE_RUN_HOURS": "36",
+        "STALE_RUN_HOURS": "",
         "TELEGRAM_BOT_TOKEN": "", "TELEGRAM_CHAT_ID": "",
         "WORKTREE_ROOT": str(ROOT.parent / f".agent-worktrees-{ROOT.name}"),
     }
@@ -390,7 +391,7 @@ def claude_available() -> bool:
 
 
 NO_CLAUDE_MSG = ("Máy này không có Claude Code CLI (`{bin}`). Lệnh này cần gọi agent nên phải chạy "
-                 "trên máy có cài `claude` (ví dụ máy chạy đêm). Các lệnh approve, status, report, "
+                 "trên máy có cài `claude` (ví dụ mini PC). Các lệnh approve, status, report, "
                  "doctor, sync, set, import vẫn dùng được ở đây.")
 
 
@@ -437,7 +438,7 @@ def stale_running(rec: dict, lock: dict) -> bool:
     if rec.get("status") != "running":
         return False
     held = lock.get("host") == rec.get("host") and age_hours(lock.get("started", "")) < float(CFG["LOCK_HOURS"])
-    if rec.get("host") == HOST and (STATE_DIR / "night.lock").exists():
+    if rec.get("host") == HOST and (STATE_DIR / "run.lock").exists():
         held = True  # this machine is running it right now
     return not held and age_hours(rec.get("updated", "")) > 1
 
@@ -463,8 +464,8 @@ def cmd_status(args):
     print("\nTổng: " + ", ".join(f"{k} {v}" for k, v in sorted(counts.items())) if counts else "")
     for h, d in sorted(hosts.items()):
         m = d.get("meta", {})
-        last = local_time(m["last_run"]) if m.get("last_run") else "chưa chạy đêm"
-        print(f"Máy {h}: lượt chạy cuối {last} · cập nhật {local_time(m.get('last_seen', ''))}")
+        last = local_time(m["last_run"]) if m.get("last_run") else "chưa chạy phiên nào"
+        print(f"Máy {h}: phiên cuối {last} · cập nhật {local_time(m.get('last_seen', ''))}")
     if lock:
         print(f"🔒 Đang chạy: {lock.get('host')} từ {local_time(lock.get('started', ''))}")
     if not fetched and not getattr(args, "offline", False):
@@ -593,7 +594,7 @@ def cmd_doctor(args):
         say("✗", "thiếu runner/config.env → cp runner/config.env.example runner/config.env")
     ok, v = claude_version_ok()
     if ok is None and not claude_available():
-        say("!", "máy này không có Claude Code CLI → không chạy được `plan` (tự động) và `night`; "
+        say("!", "máy này không có Claude Code CLI → không chạy được `plan` (tự động) và `run`; "
                  "approve/status/report/doctor/sync/set/import vẫn dùng được")
     else:
         say("✓" if ok else ("✗" if ok is None else "!"), f"claude {v}" + ("" if ok else " (cần ≥ 2.1.295)"))
@@ -618,7 +619,7 @@ def cmd_doctor(args):
     if fetched:
         say("✓", f"đọc được nhánh {LOG_BRANCH}")
     elif has_origin():
-        say("!", f"chưa có nhánh {LOG_BRANCH} trên origin (sẽ được tạo ở lượt night đầu tiên)")
+        say("!", f"chưa có nhánh {LOG_BRANCH} trên origin (sẽ được tạo ở phiên `run` đầu tiên)")
     base = CFG["BASE_BRANCH"]
     if has_origin() and git(["fetch", "-q", "origin", base], check=False).returncode == 0:
         behind = git(["rev-list", "--count", f"HEAD..origin/{base}"], check=False).stdout.strip()
@@ -626,19 +627,19 @@ def cmd_doctor(args):
         if behind not in ("", "0"):
             say("!", f"máy này chậm {behind} commit so với origin/{base} → git pull")
         elif ahead not in ("", "0"):
-            say("!", f"máy này có {ahead} commit chưa push → git push (máy chạy đêm sẽ không thấy)")
+            say("!", f"máy này có {ahead} commit chưa push → git push (máy khác chạy `run` sẽ không thấy)")
         else:
             say("✓", f"khớp với origin/{base}")
     dirty = git(["status", "--porcelain", "--", "tasks"], check=False).stdout.strip()
     if dirty:
-        say("!", "tasks/ có thay đổi chưa commit → máy chạy đêm sẽ không thấy")
+        say("!", "tasks/ có thay đổi chưa commit → máy khác chạy `run` sẽ không thấy")
     hosts = remote_hosts()
     for h, d in sorted(hosts.items()):
         last = d.get("meta", {}).get("last_run", "")
-        if last and age_hours(last) > float(CFG["STALE_RUN_HOURS"]):
-            say("!", f"máy {h}: lượt chạy cuối {local_time(last)} — cron có còn chạy?")
+        if last and CFG.get("STALE_RUN_HOURS") and age_hours(last) > float(CFG["STALE_RUN_HOURS"]):
+            say("!", f"máy {h}: phiên cuối {local_time(last)}, quá {CFG['STALE_RUN_HOURS']} giờ — lịch chạy tự động có còn hoạt động?")
         elif last:
-            say("✓", f"máy {h}: lượt chạy cuối {local_time(last)}")
+            say("✓", f"máy {h}: phiên cuối {local_time(last)}")
     lock = remote_lock()
     if lock:
         if age_hours(lock.get("started", "")) < float(CFG["LOCK_HOURS"]):
@@ -778,8 +779,8 @@ def cmd_approve(args):
         print(f"✓ {t['id']} approved" + (f" (#{t['issue']})" if t.get("issue") else ""))
     publish(st, msg="approve")
     if any(t.get("holdout") is True for t in picked):
-        print("\nTask có holdout: true → bài test ẩn sẽ được viết trên máy chạy đêm, ngay trước khi làm task.")
-    print("\nNhớ commit + push thư mục tasks/ để máy chạy đêm kéo về.")
+        print("\nTask có holdout: true → bài test ẩn sẽ được viết trong phiên `run`, trên máy chạy task, ngay trước khi làm task đó.")
+    print("\nNhớ commit + push thư mục tasks/ để máy khác chạy `run` thấy được.")
 
 
 def write_holdout(t: dict):
@@ -808,7 +809,7 @@ def needs_holdout(t: dict) -> bool:
 
 
 class SkipTask(Exception):
-    """Task can't run tonight for a reason that is not the agent's fault (no attempt used)."""
+    """Task can't run in this session for a reason that is not the agent's fault (no attempt used)."""
 
 
 def gh_snapshot() -> dict:
@@ -893,7 +894,7 @@ def cmd_import(_args):
         print(f"+ {p.relative_to(ROOT)}  (cần có mục '# Acceptance' rồi mới approve được)")
 
 
-# ───────────────────────── night run ─────────────────────────
+# ───────────────────────── run (one work session) ─────────────────────────
 def ready_tasks(tasks, st):
     out = []
     for t in tasks.values():
@@ -1058,11 +1059,11 @@ def notify(text: str):
         print(f"telegram: {e}")
 
 
-def cmd_night(args):
+def cmd_run(args):
     STATE_DIR.mkdir(parents=True, exist_ok=True)
-    lock = STATE_DIR / "night.lock"
+    lock = STATE_DIR / "run.lock"
     if lock.exists() and age_hours(dt.datetime.fromtimestamp(lock.stat().st_mtime, dt.timezone.utc).isoformat()) < float(CFG["LOCK_HOURS"]):
-        sys.exit("Đang có một lượt chạy khác trên máy này (night.lock).")
+        sys.exit("Đang có một phiên run khác trên máy này (.agent-kit/run.lock).")
     if not claude_available():
         sys.exit(NO_CLAUDE_MSG.format(bin=CFG["CLAUDE_BIN"]))
     lock.write_text(str(os.getpid()))
@@ -1072,12 +1073,12 @@ def cmd_night(args):
             sys.exit("agent-kit chưa được commit lên repo → worktree sẽ không có rào chắn. Commit trước.")
         if flag("GIT_PULL") and has_origin():
             if git(["status", "--porcelain", "--untracked-files=no"]).stdout.strip():
-                msg = "Dừng: máy chạy đêm có thay đổi chưa commit → không pull được spec mới. Dọn sạch rồi chạy lại."
+                msg = "Dừng: repo trên máy này có thay đổi chưa commit → không pull được spec mới. Commit/push hoặc dọn sạch rồi chạy lại."
                 notify(f"agent-kit · {ROOT.name} · {HOST}\n{msg}")
                 sys.exit(msg)
             r = git(["pull", "-q", "--ff-only"], check=False)
             if r.returncode != 0:
-                msg = f"Dừng: git pull --ff-only thất bại ({r.stderr.strip()[:200]}). Máy chạy đêm không được có commit riêng."
+                msg = f"Dừng: git pull --ff-only thất bại ({r.stderr.strip()[:200]}). Push commit của máy này lên trước rồi chạy lại."
                 notify(f"agent-kit · {ROOT.name} · {HOST}\n{msg}")
                 sys.exit(msg)
         try:
@@ -1102,7 +1103,7 @@ def cmd_night(args):
                 break
             except SkipTask as e:
                 rec = st.setdefault(str(t["id"]), {})
-                set_status(t, st, "queued", note=f"bỏ qua đêm nay: {e}")
+                set_status(t, st, "queued", note=f"bỏ qua phiên này: {e}")
                 results.append({"id": str(t["id"]), "passed": False, "reasons": [f"bỏ qua (không tính lượt thử): {e}"],
                                 "pr": "", "cost": 0})
             except Exception as e:
@@ -1125,7 +1126,7 @@ def cmd_night(args):
         (run_dir / "meta.json").write_text(json.dumps(
             {"host": HOST, "started": started, "finished": now(), "tasks": [r["id"] for r in results],
              "stopped": stopped}, indent=2, ensure_ascii=False))
-        if not publish(st, run_dir, meta={"last_run": started}, msg="night summary") and LOG.enabled():
+        if not publish(st, run_dir, meta={"last_run": started}, msg="run summary") and LOG.enabled():
             lines.append(f"(!) Không chia sẻ được kết quả lên nhánh {LOG_BRANCH}")
         print(summary)
         notify(summary)
@@ -1147,7 +1148,8 @@ def main():
     p = sub.add_parser("doctor"); p.add_argument("--fix", action="store_true"); p.set_defaults(fn=cmd_doctor)
     p = sub.add_parser("plan"); p.add_argument("design_dir"); p.set_defaults(fn=cmd_plan)
     p = sub.add_parser("approve"); p.add_argument("target"); p.set_defaults(fn=cmd_approve)
-    p = sub.add_parser("night"); p.add_argument("--max", type=int, default=0); p.set_defaults(fn=cmd_night)
+    for name in ("run", "night"):  # `night` kept as an alias for older setups
+        p = sub.add_parser(name); p.add_argument("--max", type=int, default=0); p.set_defaults(fn=cmd_run)
     sub.add_parser("sync").set_defaults(fn=cmd_sync)
     sub.add_parser("import").set_defaults(fn=cmd_import)
     p = sub.add_parser("set"); p.add_argument("id"); p.add_argument("status"); p.set_defaults(fn=cmd_set)

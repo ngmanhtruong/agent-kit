@@ -12,10 +12,10 @@ Lưu ý: `template/CLAUDE.md`, `template/docs/` là **mẫu** cho project đích
 - `README.md` — hướng dẫn đầy đủ cho người dùng và agent. Sửa hành vi thì **phải** sửa README tương ứng.
 
 ## Bất biến — không được phá
-1. Trạng thái chạy không ghi vào `tasks/*.md` (tránh xung đột giữa MacBook và mini PC). Trạng thái dùng chung nằm trên nhánh orphan `agent-kit/log`; **mỗi máy chỉ ghi file của chính nó** (`state/<máy>.json`, `runs/<máy>/...`), đọc thì gộp theo `updated` (UTC) mới nhất. `lock.json` trên nhánh đó chống hai máy chạy `night` cùng lúc.
+1. Trạng thái chạy không ghi vào `tasks/*.md` (tránh xung đột giữa các máy). Trạng thái dùng chung nằm trên nhánh orphan `agent-kit/log`; **mỗi máy chỉ ghi file của chính nó** (`state/<máy>.json`, `runs/<máy>/...`), đọc thì gộp theo `updated` (UTC) mới nhất. `lock.json` trên nhánh đó chống hai máy chạy `run` cùng lúc. Không có khái niệm máy "ngày"/"đêm": mọi máy ngang hàng, phiên `run` chạy lúc nào cũng được.
 1b. `status`, `report`, `doctor` (không `--fix`) **chỉ đọc**: chỉ `git fetch` ref nhánh log, không sửa file, không đổi nhánh, không push, không ghi `.agent-kit/state.json`.
-1c. `night` không chạy spec cũ: `git pull --ff-only` thất bại thì dừng.
-1d. Chỉ `night` (và `plan` khi có CLI) được gọi Claude Code. `approve`, `status`, `report`, `doctor`, `sync`, `set`, `import` không bao giờ gọi AI — người dùng có máy chỉ có Copilot. Bài test ẩn được viết trong `night`, trên máy chạy test, trước khi implementer bắt đầu.
+1c. `run` không chạy spec cũ: `git pull --ff-only` thất bại thì dừng.
+1d. Chỉ `run` (và `plan` khi có CLI) được gọi Claude Code. `approve`, `status`, `report`, `doctor`, `sync`, `set`, `import` không bao giờ gọi AI — người dùng có máy chỉ có Copilot. Bài test ẩn được viết trong `run`, trên máy chạy test, trước khi implementer bắt đầu.
 2. Test ẩn không bao giờ nằm trong repo đích hay trong tầm đọc của worker/implementer.
 3. Chỉ runner (script) được push, tạo PR/issue. Agent thì không.
 4. Hook dùng `onFailure: "block"`: hook lỗi thì chặn.
@@ -33,7 +33,7 @@ Lưu ý: `template/CLAUDE.md`, `template/docs/` là **mẫu** cho project đích
 ```bash
 python3 -m py_compile install.py template/runner/kit.py template/.claude/hooks/*.py
 ```
-Rồi chạy thử end-to-end: cài vào một repo git tạm, dùng một file `claude` giả (script in JSON) qua `CLAUDE_BIN` trong `runner/config.env`, chạy `kit.py approve` và `kit.py night`, kiểm tra cả nhánh PASS lẫn FAIL.
+Rồi chạy thử end-to-end: cài vào một repo git tạm, dùng một file `claude` giả (script in JSON) qua `CLAUDE_BIN` trong `runner/config.env`, chạy `kit.py approve` và `kit.py run`, kiểm tra cả nhánh PASS lẫn FAIL.
 
 Hook test nhanh:
 ```bash

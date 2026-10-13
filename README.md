@@ -39,7 +39,7 @@ Tài liệu này viết cho **hai loại người đọc**:
 | 03 | **Dựng hàng rào** | "Làm sao chặn AI vượt giới hạn mà không cần ai nhớ đi kiểm?" | Rào cứng: hooks + permissions + worktree riêng + không cho push. Rào mềm: `CLAUDE.md` |
 
 Các nguyên tắc đi kèm:
-- **Chưa tin 1 agent thì đừng mở thêm.** Bắt đầu 1 task/đêm, tăng dần.
+- **Chưa tin 1 agent thì đừng mở thêm.** Bắt đầu 1 task mỗi phiên, tăng dần.
 - **Rào cứng > rào mềm.** Lỗi nào lặp lại 2 lần → biến thành check tự động (skill `promote-rule`).
 - **Cấm AI tự ghi chú.** AI không được sửa `CLAUDE.md`, `docs/`. Muốn đổi thì đề xuất trong báo cáo, người quyết. Tránh "một lời góp ý thành lệnh cấm vĩnh viễn".
 - **Giấu bài kiểm tra.** Test ẩn nằm ngoài repo, đặt tên như test bình thường; agent làm bài không bao giờ thấy.
@@ -51,21 +51,22 @@ Các nguyên tắc đi kèm:
 
 ### 2.1 Luồng công việc
 
+Không có máy "ngày" hay máy "đêm". Mọi máy ngang hàng; một **phiên làm việc** (`kit.py run`) chạy lúc nào cũng được, trên máy nào có Claude Code cũng được — bạn chạy tay khi muốn, hoặc đặt lịch tự động nếu thích. Các bước chuẩn bị và review làm ở máy nào cũng được.
+
 ```
- BẠN · MacBook (ngày)                MINI PC (đêm, cron)                    BẠN (sáng)
- ────────────────────                ───────────────────                    ──────────
- 1. Claude Design                    5. kit.py night                        7. GitHub: đọc PR
-    → export vào design/<feature>/      với mỗi task sẵn sàng:                 (đã kèm điểm chấm)
- 2. kit.py plan                          a. tạo nhánh + worktree riêng       8. Merge hoặc đóng PR
-    → planner sinh tasks nháp            b. WORKER làm bài                   9. kit.py sync
- 3. Bạn sửa, trả lời câu hỏi mở          c. eval/checks.sh  (thang điểm)        → task "done",
- 4. kit.py approve (không cần Claude)    d. test ẩn         (worker không thấy)    mở khoá task phụ thuộc
-    → GitHub Issue                       e. REVIEWER chấm độc lập
-    → git push                           f. PASS → push + mở PR
+ CHUẨN BỊ (bất kỳ máy nào)            PHIÊN `kit.py run` (máy có Claude Code,  REVIEW (bất kỳ máy nào)
+                                      lúc nào cũng được)
+ ──────────────────────────           ─────────────────────────────────────   ──────────────────────
+ 1. Claude Design                     5. với mỗi task sẵn sàng:                 7. status / report
+    → export vào design/<feature>/       a. TEST-WRITER viết test ẩn (nếu cần)   8. GitHub: đọc PR
+ 2. kit.py plan                          b. tạo nhánh + worktree riêng              (đã kèm điểm chấm)
+    → planner sinh tasks nháp            c. IMPLEMENTER làm bài                  9. Merge hoặc đóng PR
+ 3. Bạn sửa, trả lời câu hỏi mở          d. eval/checks.sh  (thang điểm)         10. kit.py sync
+ 4. kit.py approve (không cần Claude)    e. test ẩn         (worker không thấy)      → task "done",
+    → GitHub Issue                       f. REVIEWER chấm độc lập                     mở khoá task phụ thuộc
+    → git push                           g. PASS → push + mở PR
                                             FAIL → thử lại, kèm lý do lần trước
-                                         (trước bước a: TEST-WRITER viết test ẩn
-                                          nếu task có holdout: true)
-                                     6. Báo cáo → file + Telegram
+                                      6. Tóm tắt → nhánh log + Telegram
 ```
 
 ### 2.2 Agent chủ và sáu agent con
@@ -77,16 +78,16 @@ Mỗi công việc có một file hướng dẫn riêng trong `.claude/agents/<t
 | **context-writer** | Quét codebase → đề xuất `CLAUDE.md`, `architecture.md`, `checks.sh` | Agent chủ | chỉ `.agent-kit/proposals/` |
 | **planner** | Design → epic + tasks nháp | Agent chủ hoặc `kit.py plan` | chỉ `tasks/` |
 | **bug-triager** | Bug report → task bug nháp có bước tái hiện | Agent chủ | chỉ `tasks/bugs/` |
-| **test-writer** | Task → bài test ẩn | `kit.py night` (trước khi làm task) | chỉ `.agent-kit/holdout-staging/` |
-| **implementer** | Làm một task đã duyệt | `kit.py night` hoặc agent chủ | mọi nơi **trừ** vùng bảo vệ |
-| **reviewer** | Chấm độc lập → JSON PASS/FAIL | `kit.py night` hoặc agent chủ | không ghi gì |
+| **test-writer** | Task → bài test ẩn | `kit.py run` (trước khi làm task) | chỉ `.agent-kit/holdout-staging/` |
+| **implementer** | Làm một task đã duyệt | `kit.py run` hoặc agent chủ | mọi nơi **trừ** vùng bảo vệ |
+| **reviewer** | Chấm độc lập → JSON PASS/FAIL | `kit.py run` hoặc agent chủ | không ghi gì |
 
 Quyền ghi được hook ép theo vai trò. Vai trò lấy từ tên agent con (`agent_type` trong dữ liệu hook) khi agent chủ spawn, hoặc từ biến môi trường `AGENT_KIT_ROLE` khi runner gọi. Hook chấm bài khi dừng chạy cho cả phiên chính (`Stop`) lẫn agent con (`SubagentStop`), nhưng chỉ khi có **code** thay đổi (sửa `tasks/`, `docs/`... không kích hoạt chấm).
 
 ### 2.3 Vòng đời một task
 
 ```
-draft ──approve──▶ queued ──night──▶ running ──┬─ PASS ─▶ review ──merge PR──▶ done
+draft ──approve──▶ queued ──run────▶ running ──┬─ PASS ─▶ review ──merge PR──▶ done
                      ▲                         │                 └─đóng PR───▶ failed
                      └──── FAIL (còn lượt) ────┤
                                                └─ FAIL (hết lượt) ─▶ failed + nhãn needs-human
@@ -98,22 +99,22 @@ draft ──approve──▶ queued ──night──▶ running ──┬─ PA
 
 ### 2.4 Nhiều máy cùng làm việc mà không sai lệch
 
-Bạn có thể chạy đêm trên máy A, sáng mở máy B, `git pull` rồi kiểm tra mọi thứ đã xảy ra. Thiết kế đảm bảo điều đó như sau:
+Bạn có thể chạy một phiên `run` trên máy A, rồi lúc nào đó mở máy B, `git pull` và kiểm tra mọi thứ đã xảy ra — hoặc tiếp tục làm việc ngay trên máy B. Thiết kế đảm bảo điều đó như sau:
 
 | Loại dữ liệu | Nằm ở đâu | Ai ghi |
 |---|---|---|
-| **Spec** (`tasks/*.md`, `design/`, `CLAUDE.md`...) | Nhánh code (`main`) | Chỉ người, từ máy làm việc ban ngày |
+| **Spec** (`tasks/*.md`, `design/`, `CLAUDE.md`...) | Nhánh code (`main`) | Chỉ người (máy nào cũng được), commit + push |
 | **Trạng thái chạy** của từng task | Nhánh riêng `agent-kit/log`, file `state/<tên-máy>.json` | Mỗi máy chỉ ghi file của chính nó |
 | **Log từng lượt chạy** (tóm tắt, checks, test ẩn, reviewer, báo cáo) | Nhánh `agent-kit/log`, thư mục `runs/<tên-máy>/<thời-điểm>/` | Máy đã chạy lượt đó |
 | **Code của từng lần thử** | Nhánh `agent/<task>-a<n>` trên origin (cả PASS lẫn FAIL) | Runner |
-| **Khoá "đang chạy"** | Nhánh `agent-kit/log`, file `lock.json` | Máy đang chạy đêm |
+| **Khoá "đang chạy"** | Nhánh `agent-kit/log`, file `lock.json` | Máy đang chạy phiên `run` |
 | Nhãn GitHub Issue `status:*` | GitHub (nếu `GH_SYNC=1`) | Runner, `sync`, hoặc bạn sửa tay |
 
 Vì sao không sai lệch:
 1. **Không ai ghi đè ai.** Mỗi máy chỉ ghi file mang tên mình trên nhánh `agent-kit/log`, nên push từ hai máy không bao giờ xung đột (bị từ chối thì runner tự thử lại trên bản mới nhất).
 2. **Gộp theo bản mới nhất.** Khi đọc, `kit.py` gộp trạng thái của mọi máy; với mỗi task, bản ghi có thời điểm (UTC) mới nhất thắng. Nhãn GitHub được sửa tay sau đó cũng thắng.
-3. **Không chạy trùng.** `night` lấy khoá `lock.json` trước khi chạy; máy khác thấy khoá còn hạn thì từ chối chạy. Khoá của lượt chạy bị chết tự hết hạn sau `LOCK_HOURS`.
-4. **Không chạy spec cũ.** `night` bắt buộc `git pull --ff-only` thành công; máy chạy đêm có thay đổi riêng thì dừng và báo.
+3. **Không chạy trùng.** `run` lấy khoá `lock.json` trước khi chạy; máy khác thấy khoá còn hạn thì từ chối chạy. Khoá của lượt chạy bị chết tự hết hạn sau `LOCK_HOURS`.
+4. **Không chạy spec cũ.** `run` bắt buộc `git pull --ff-only` thành công; máy đó có thay đổi chưa commit/push thì dừng và báo.
 5. **Biết khi spec bị sửa sau khi chạy.** Mỗi lần chạy ghi lại mã băm của spec và commit gốc; `doctor` cảnh báo nếu spec đã đổi sau đó.
 6. **Lệnh kiểm tra chỉ đọc.** `status`, `report`, `doctor` (không `--fix`) chỉ `git fetch` nhánh log; không sửa file, không đổi nhánh, không push.
 
@@ -142,7 +143,7 @@ your-project/
 ├── eval/
 │   └── checks.sh                 ★ Thang điểm: 1 lệnh, exit 0 = đạt (bạn điền)
 ├── runner/
-│   ├── kit.py                      Bộ điều phối (plan / approve / night / sync / ...)
+│   ├── kit.py                      Bộ điều phối (plan / approve / run / status / ...)
 │   ├── config.env.example          Mẫu cấu hình
 │   └── config.env                ★ Cấu hình riêng từng máy (bạn điền, KHÔNG commit)
 ├── .github/
@@ -164,7 +165,7 @@ your-project/
 │   └── skills/
 │       ├── finish-task/SKILL.md    Quy trình bắt buộc khi hoàn tất task
 │       └── promote-rule/SKILL.md   Biến lỗi lặp lại thành quy định tự động
-└── .agent-kit/                     (gitignore) state, logs, báo cáo từng đêm
+└── .agent-kit/                     (gitignore) state, logs, báo cáo từng phiên
 ```
 
 ★ = 4 file bắt buộc phải điền (xem mục 5).
@@ -183,7 +184,7 @@ your-project/
 | `tasks/<feature>/*.md` | Planner sinh, người duyệt | Spec của từng task: mục tiêu, interface, acceptance. |
 | `eval/checks.sh` | Người | Bài chấm chung. Worker phải pass mới được dừng; runner chạy lại để xác nhận. |
 | `runner/kit.py` | Không ai (trừ khi nâng cấp kit) | Điều phối toàn bộ luồng. |
-| `runner/config.env` | Người, từng máy | Số task/đêm, đường dẫn `claude`, test ẩn, GitHub, Telegram. |
+| `runner/config.env` | Người, từng máy | Số task mỗi phiên, đường dẫn `claude`, test ẩn, GitHub, Telegram. |
 | `.claude/settings.json` | Người | Danh sách lệnh được phép/cấm và đăng ký hooks. |
 | `.claude/hooks/*.py` | Người | Rào cứng. Chạy tự động trước mỗi lệnh/ghi file và khi agent dừng. |
 | `docs/orchestration.md` | Người | Sổ tay của agent chủ: bảng agent con, chọn agent theo yêu cầu, quy tắc điều phối, mẫu prompt khi spawn. Được nạp sẵn qua `CLAUDE.md`. |
@@ -201,21 +202,21 @@ your-project/
 | `git` | `git --version` | Mọi máy |
 | `python3` ≥ 3.8 | `python3 --version` | Mọi máy. Chỉ dùng thư viện chuẩn, không cần `pip install` |
 | `gh` (GitHub CLI) | `gh auth status` | Mọi máy, nếu bật `GH_SYNC=1`. Đăng nhập bằng `gh auth login` |
-| `claude` (Claude Code) | `claude --version` | **Chỉ máy chạy `night`** (và máy muốn chạy `plan` tự động). Đã đăng nhập gói Pro, bản **≥ 2.1.295** |
+| `claude` (Claude Code) | `claude --version` | **Chỉ máy nào muốn chạy `run`** (và `plan` tự động). Đã đăng nhập gói Pro, bản **≥ 2.1.295** |
 
 ### 4.1.1 Máy không có Claude Code (ví dụ chỉ có Copilot Chat trong VS Code)
 
-Máy như vậy vẫn làm được toàn bộ phần việc ban ngày:
+Máy như vậy vẫn làm được mọi việc trừ chạy phiên `run`:
 
 | Việc | Cách làm |
 |---|---|
 | `approve`, `status`, `report`, `doctor`, `sync`, `set`, `import` | Chạy bình thường, các lệnh này không gọi AI |
 | Chia design thành task | `kit.py plan design/<feature>` in ra một đoạn prompt; dán vào Copilot Chat (chế độ Agent). Copilot đọc `.claude/agents/planner.md` và ghi task nháp vào `tasks/` |
 | Các việc khác (bug-triager, context-writer, implementer...) | Nói với Copilot: "đọc `.claude/agents/<tên>.md` và làm theo cho ...". `.github/copilot-instructions.md` (được cài sẵn) dặn Copilot đọc `CLAUDE.md`, `docs/orchestration.md` và tự giữ quy tắc |
-| Bài test ẩn | Không cần làm gì: máy chạy đêm tự viết, ngay trước khi làm task |
-| `night` | Không chạy được; báo lỗi rõ ràng và dừng |
+| Bài test ẩn | Không cần làm gì: phiên `run` tự viết, ngay trước khi làm task |
+| `run` | Không chạy được; báo lỗi rõ ràng và dừng. Chạy trên máy khác có Claude Code |
 
-Lưu ý: rào cứng (hooks) chỉ chạy trong Claude Code. Copilot chỉ được nhắc bằng văn bản (rào mềm), nên hãy xem kỹ những gì Copilot sửa trước khi commit. Mọi task vẫn được chấm đầy đủ (checks, test ẩn, reviewer) khi chạy đêm trên máy có Claude Code.
+Lưu ý: rào cứng (hooks) chỉ chạy trong Claude Code. Copilot chỉ được nhắc bằng văn bản (rào mềm), nên hãy xem kỹ những gì Copilot sửa trước khi commit. Mọi task vẫn được chấm đầy đủ (checks, test ẩn, reviewer) khi task được chạy trong phiên `run` trên máy có Claude Code.
 
 ### 4.2 Cài vào project có sẵn
 
@@ -239,22 +240,25 @@ cd ~/code/my-project
 git add -A && git commit -m "add agent-kit" && git push
 ```
 
-Bắt buộc phải commit: runner tạo worktree từ nhánh gốc, nếu `.claude/` chưa commit thì worker sẽ chạy **không có rào chắn**. `kit.py night` tự kiểm tra và từ chối chạy trong trường hợp này.
+Bắt buộc phải commit: runner tạo worktree từ nhánh gốc, nếu `.claude/` chưa commit thì worker sẽ chạy **không có rào chắn**. `kit.py run` tự kiểm tra và từ chối chạy trong trường hợp này.
 
-### 4.4 Trên mini PC
+### 4.4 Thêm một máy khác
+
+Máy nào cũng cài giống nhau:
 
 ```bash
 git clone <repo project> && cd <project>
-cp runner/config.env.example runner/config.env   # rồi chỉnh (mục 8)
-gh auth login
-python3 runner/kit.py night --max 1               # chạy thử 1 task
+cp runner/config.env.example runner/config.env   # chỉnh (mục 8); đặt MACHINE_NAME riêng cho máy này
+gh auth login                                    # nếu GH_SYNC=1
+python3 runner/kit.py doctor                     # kiểm tra máy này
+python3 runner/kit.py run --max 1                # (máy có Claude Code) chạy thử 1 task
 ```
 
-Đặt lịch (Linux, `crontab -e`), ví dụ 1h sáng:
+Chạy `run` lúc nào bạn muốn. **Tuỳ chọn** đặt lịch tự động, ví dụ mỗi 4 tiếng (Linux/macOS, `crontab -e`):
 ```
-0 1 * * * cd /home/<user>/code/<project> && /usr/bin/python3 runner/kit.py night >> .agent-kit/night.log 2>&1
+0 */4 * * * cd /đường/dẫn/project && /usr/bin/python3 runner/kit.py run >> .agent-kit/run.log 2>&1
 ```
-Trong cron PATH rất ngắn, nên đặt `CLAUDE_BIN` trong `config.env` bằng đường dẫn tuyệt đối (lấy từ `which claude`).
+Khi chạy theo lịch, PATH rất ngắn nên đặt `CLAUDE_BIN` trong `config.env` bằng đường dẫn tuyệt đối (lấy từ `which claude`). Hai máy cùng đặt lịch cũng không sao: khoá đảm bảo một lúc chỉ một máy chạy, máy kia tự bỏ qua.
 
 ---
 
@@ -335,7 +339,7 @@ Tối thiểu cần chỉnh: `BASE_BRANCH`, `CLAUDE_BIN`, `HOLDOUT_DIR`, `HOLDOU
 
 ## 6. Quy trình hằng ngày
 
-### Bước 1 — Design (MacBook)
+### Bước 1 — Design
 
 1. Làm design trên Claude Design.
 2. Export ra PDF/PNG/HTML, bỏ vào `design/<feature>/`.
@@ -377,20 +381,20 @@ git add tasks && git commit -m "approve <FEAT>" && git push
 - Nếu `GH_SYNC=1`: tạo GitHub Issue (nhãn `agent-kit`, loại, `status:queued`), ghi số issue vào file.
 - **Không gọi AI**, chạy được trên máy không có Claude Code.
 
-Bài test ẩn cho task `holdout: true` được viết trên **máy chạy đêm**, ngay trước khi làm task đó: test-writer đọc spec và code gốc hiện tại, ghi ra `HOLDOUT_DIR/<task-id>/` của chính máy đó. Đã có thì dùng lại. Test-writer không viết được thì task được bỏ qua đêm đó mà không tính lượt thử.
+Bài test ẩn cho task `holdout: true` được viết trong **phiên `run`**, ngay trước khi làm task đó: test-writer đọc spec và code gốc hiện tại, ghi ra `HOLDOUT_DIR/<task-id>/` trên chính máy chạy task. Đã có thì dùng lại. Test-writer không viết được thì task được bỏ qua phiên đó mà không tính lượt thử.
 
-### Bước 5 — Đêm (mini PC, tự động)
+### Bước 5 — Chạy một phiên (máy có Claude Code, lúc nào cũng được)
 
-`kit.py night`:
+`kit.py run`:
 1. `git pull --ff-only` để nhận task mới duyệt (thất bại → dừng và báo).
 2. Lấy khoá `lock.json` trên nhánh `agent-kit/log` (máy khác đang chạy → dừng).
 3. `sync` trạng thái từ mọi máy và GitHub.
 4. Chọn tối đa `MAX_TASKS` task sẵn sàng, theo `priority`.
-5. Với từng task: worker → checks → test ẩn → reviewer → push nhánh → PR (PASS) hoặc thử lại (FAIL). Sau mỗi task, trạng thái và log được đẩy lên nhánh `agent-kit/log`, nên máy khác thấy tiến độ ngay cả khi đêm chưa xong.
-6. Dừng sớm nếu chạm giới hạn gói Pro; task dở được trả về hàng đợi cho đêm sau.
+5. Với từng task: worker → checks → test ẩn → reviewer → push nhánh → PR (PASS) hoặc thử lại (FAIL). Sau mỗi task, trạng thái và log được đẩy lên nhánh `agent-kit/log`, nên máy khác thấy tiến độ ngay cả khi phiên chưa xong.
+6. Dừng sớm nếu chạm giới hạn gói Pro; task dở được trả về hàng đợi cho phiên sau.
 7. Ghi tóm tắt, nhả khoá, gửi Telegram.
 
-### Bước 6 — Sáng: kiểm tra (trên bất kỳ máy nào)
+### Bước 6 — Kiểm tra (bất kỳ máy nào, bất kỳ lúc nào)
 
 ```bash
 git pull
@@ -400,7 +404,7 @@ python3 runner/kit.py report --task FEAT-02   # vì sao FAIL: lý do, checks, te
 python3 runner/kit.py doctor              # kiểm tra toàn bộ: cài đặt, đồng bộ, tasks, task kẹt
 ```
 
-Ba lệnh này **chỉ đọc**, chạy bao nhiêu lần, trên máy nào cũng được, kể cả khi máy kia đang chạy đêm.
+Ba lệnh này **chỉ đọc**, chạy bao nhiêu lần, trên máy nào cũng được, kể cả khi máy khác đang chạy phiên `run`.
 
 Muốn xem code của một lần thử FAIL: `git fetch origin && git checkout agent/FEAT-02-a2`.
 
@@ -426,7 +430,7 @@ python3 runner/kit.py import    # kéo về tasks/imported/GH-<số>.md (draft)
 python3 runner/kit.py approve GH-<số>
 ```
 
-### Làm việc ban ngày với agent chủ
+### Làm việc trực tiếp với agent chủ
 
 Mở `claude` trong project và nói việc cần làm. Agent chủ tự chọn agent con theo `docs/orchestration.md`:
 
@@ -440,14 +444,13 @@ Mở `claude` trong project và nói việc cần làm. Agent chủ tự chọn 
 
 Agent chủ không duyệt task thay bạn, không push, không tạo PR. Những việc đó vẫn qua `kit.py`.
 
-### Phân vai 2 máy
+### Nhiều máy
 
-| Máy | Làm | Không làm |
-|---|---|---|
-| **MacBook** | design, plan, sửa task, approve, review PR, sync, status/report/doctor | `night` |
-| **Mini PC** | `night` (cron), status/report/doctor | sửa `tasks/`, commit riêng |
-
-Đặt `MACHINE_NAME` khác nhau trên mỗi máy (ví dụ `macbook`, `minipc`) để báo cáo ghi rõ máy nào đã làm gì. Máy nào chạy `night` cũng được, miễn là một lúc chỉ một máy (khoá tự đảm bảo).
+Mọi máy ngang hàng, làm được mọi lệnh (riêng `run` và `plan` tự động cần Claude Code). Chỉ cần nhớ:
+- Đặt `MACHINE_NAME` khác nhau trên mỗi máy (ví dụ `macbook`, `minipc`) để báo cáo ghi rõ máy nào đã làm gì.
+- Sửa `tasks/` xong thì commit + push, để máy khác thấy.
+- Trước khi `run`, máy đó phải sạch và đã push (nếu không `run` sẽ dừng và nhắc).
+- Một lúc chỉ một máy chạy `run`; khoá tự đảm bảo.
 
 ---
 
@@ -466,7 +469,7 @@ Chạy từ thư mục gốc project: `python3 runner/kit.py <lệnh>`
 
 `doctor` kiểm tra:
 - **Cài đặt:** `config.env`, phiên bản `claude`, `gh` đăng nhập, khung đã commit, `checks.sh` đã cấu hình, có remote.
-- **Đồng bộ:** đọc được nhánh log; máy này chậm/nhanh hơn `origin/<BASE_BRANCH>`; `tasks/` có thay đổi chưa commit; lượt chạy cuối của từng máy (cảnh báo nếu quá `STALE_RUN_HOURS` — cron có còn chạy?); khoá đang giữ hay đã chết.
+- **Đồng bộ:** đọc được nhánh log; máy này chậm/nhanh hơn `origin/<BASE_BRANCH>`; `tasks/` có thay đổi chưa commit; phiên cuối của từng máy (cảnh báo nếu đặt `STALE_RUN_HOURS` và đã quá — lịch tự động có còn chạy?); khoá đang giữ hay đã chết.
 - **Tasks:** frontmatter hỏng, id trùng, `depends_on` trỏ tới task không tồn tại, vòng phụ thuộc, task đã duyệt mà Acceptance trống hoặc chưa có issue, thiếu test ẩn.
 - **Trạng thái chạy:** task kẹt `running`, spec bị sửa sau khi agent chạy, task `failed`, nhánh lần thử không có trên origin, PR đã merge/đóng mà chưa `sync`.
 
@@ -476,7 +479,7 @@ Chạy từ thư mục gốc project: `python3 runner/kit.py <lệnh>`
 |---|---|---|
 | `plan design/<feature>` | Planner đọc design → sinh epic + tasks nháp vào `tasks/<feature>/`. Không có Claude Code → in prompt để dán vào Copilot Chat | 1 lần (hoặc không) |
 | `approve <id\|epic\|all>` | Duyệt nháp → GitHub Issue | Không |
-| `night [--max N]` | Chạy tối đa N task sẵn sàng (mặc định `MAX_TASKS`). Cần Claude Code | 2 lần/task (worker + reviewer), +1 lần đầu nếu cần viết test ẩn |
+| `run [--max N]` | Một phiên làm việc: chạy tối đa N task sẵn sàng (mặc định `MAX_TASKS`). Cần Claude Code. `night` là tên cũ, vẫn dùng được | 2 lần/task (worker + reviewer), +1 lần đầu nếu cần viết test ẩn |
 | `sync` | Gộp trạng thái mọi máy; nhãn GitHub sửa tay; PR merged → `done`, đóng → `failed`; epic xong khi mọi task xong; chia sẻ kết quả | Không |
 | `set <id> <status>` | Đổi trạng thái tay, ví dụ `failed` → `queued` để chạy lại (đặt lại số lần thử) | Không |
 | `doctor --fix` | Đưa task kẹt `running` về `queued`, rồi `sync` | Không |
@@ -515,7 +518,7 @@ Quy tắc viết Acceptance tốt: mỗi dòng phải trả lời được **có
 | Nhánh `agent-kit/log`: `state/<máy>.json` | Trạng thái chạy mà máy đó biết, kèm giờ lượt chạy cuối | Có |
 | Nhánh `agent-kit/log`: `runs/<máy>/<thời-điểm>/SUMMARY.md`, `meta.json` | Tóm tắt một lượt chạy | Có |
 | Nhánh `agent-kit/log`: `runs/<máy>/<thời-điểm>/<task>/` | `result.json`, `review.json`, `checks.log`, `holdout.log`, `worker.txt`, báo cáo | Có |
-| Nhánh `agent-kit/log`: `lock.json` | Máy đang chạy đêm (có khi đang chạy) | Có |
+| Nhánh `agent-kit/log`: `lock.json` | Máy đang chạy phiên `run` (chỉ có khi đang chạy) | Có |
 | Nhánh `agent/<task>-a<n>` trên origin | Code của lần thử thứ n, cả PASS lẫn FAIL | Có |
 | `.agent-kit/state.json` | Bản sao trạng thái trên máy này | Không (bản chia sẻ nằm ở nhánh log) |
 | `.agent-kit/runs/` | Bản gốc log của máy này | Không |
@@ -533,23 +536,23 @@ Lưu ý bảo mật: log của worker được đẩy lên nhánh `agent-kit/log
 | Biến | Mặc định | Ý nghĩa |
 |---|---|---|
 | `BASE_BRANCH` | `main` | Nhánh gốc: tạo nhánh task từ đây, PR mở về đây |
-| `MAX_TASKS` | `3` | Số task tối đa mỗi lần `night` |
+| `MAX_TASKS` | `3` | Số task tối đa mỗi phiên `run` |
 | `TASK_TIMEOUT_MIN` | `60` | Worker chạy quá thời gian này thì bị dừng |
 | `MAX_ATTEMPTS` | `2` | Số lần thử tối đa một task trước khi `failed` |
 | `MAX_BUDGET_USD` | trống | Phanh an toàn theo chi phí **ước tính** mỗi lần gọi (với gói Pro không phải hoá đơn). Trống = tắt |
-| `CLAUDE_BIN` | `claude` | Đường dẫn tới Claude Code. Dùng đường dẫn tuyệt đối khi chạy cron |
+| `CLAUDE_BIN` | `claude` | Đường dẫn tới Claude Code. Dùng đường dẫn tuyệt đối khi chạy theo lịch |
 | `HOLDOUT_DIR` | trống | Thư mục test ẩn, **ngoài repo**. Trống = tắt test ẩn |
 | `HOLDOUT_CMD` | trống | Lệnh chạy test ẩn trong worktree, ví dụ `pytest -q tests` |
 | `REVIEW` | `1` | Bật reviewer độc lập |
 | `GH_SYNC` | `0` trong code, `1` trong file mẫu | Dùng GitHub Issue + PR qua `gh` |
-| `GIT_PULL` | `1` | `git pull --ff-only` trước mỗi lần `night`. Thất bại hoặc có thay đổi chưa commit → dừng, không chạy spec cũ |
+| `GIT_PULL` | `1` | `git pull --ff-only` đầu mỗi phiên `run`. Thất bại hoặc có thay đổi chưa commit → dừng, không chạy spec cũ |
 | `PUBLISH` | `1` | Đẩy trạng thái, log và nhánh mọi lần thử lên origin để máy khác kiểm tra |
 | `LOG_BRANCH` | `agent-kit/log` | Tên nhánh chứa trạng thái + log dùng chung |
 | `MACHINE_NAME` | hostname | Tên máy trong báo cáo. Mỗi máy phải khác nhau |
 | `LOCK_HOURS` | `12` | Khoá "đang chạy" của một lượt bị chết tự hết hạn sau số giờ này |
-| `STALE_RUN_HOURS` | `36` | `doctor` cảnh báo nếu một máy không chạy đêm quá số giờ này |
+| `STALE_RUN_HOURS` | trống (tắt) | Chỉ khi bạn đặt lịch tự động: `doctor` cảnh báo nếu một máy quá số giờ này chưa chạy phiên nào |
 | `WORKTREE_ROOT` | `../.agent-worktrees-<project>` | Nơi tạo worktree tạm, ngoài repo |
-| `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | trống | Gửi tóm tắt đêm qua Telegram |
+| `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | trống | Gửi tóm tắt mỗi phiên qua Telegram |
 
 ### 8.1 Biến môi trường khi bạn dùng Claude trực tiếp
 
@@ -570,18 +573,18 @@ Mỗi task tốn khoảng 2–3 lượt gọi Claude (worker, reviewer, cộng t
 | Hiện tượng | Nguyên nhân / cách xử lý |
 |---|---|
 | `checks.sh` báo "CHƯA CẤU HÌNH" | Chưa bỏ `#` ở dòng `step` nào. Xem mục 5.3 |
-| `night` báo "agent-kit chưa được commit" | `git add .claude eval runner && git commit && git push` |
-| `night` báo "Đang có một lượt chạy khác trên máy này" | Lượt trước còn chạy, hoặc bị kill giữa chừng. Khoá tự hết hạn sau `LOCK_HOURS`, hoặc xoá `.agent-kit/night.lock` |
-| `night` báo "Máy khác đang chạy" | Máy đó đang giữ khoá. Chờ, hoặc nếu chắc lượt đó đã chết thì chờ khoá hết hạn (`LOCK_HOURS`) |
-| `night` dừng vì `git pull` thất bại / có thay đổi chưa commit | Máy chạy đêm không được có commit/sửa đổi riêng. `git status`, dọn sạch (`git stash` hoặc `git reset --hard origin/main` nếu chắc), chạy lại |
+| `run` báo "agent-kit chưa được commit" | `git add .claude eval runner && git commit && git push` |
+| `run` báo "Đang có một phiên run khác trên máy này" | Phiên trước còn chạy, hoặc bị kill giữa chừng. Khoá tự hết hạn sau `LOCK_HOURS`, hoặc xoá `.agent-kit/run.lock` |
+| `run` báo "Máy khác đang chạy" | Máy đó đang giữ khoá. Chờ, hoặc nếu chắc lượt đó đã chết thì chờ khoá hết hạn (`LOCK_HOURS`) |
+| `run` dừng vì `git pull` thất bại / có thay đổi chưa commit | Máy này có thay đổi chưa commit hoặc commit chưa push. Commit + push (hoặc `git stash`), rồi chạy lại |
 | `status` hiện `running?` | Lượt chạy chết giữa chừng (mất điện, kill). `kit.py doctor --fix` đưa về `queued` |
-| `status` báo "Không đọc được nhánh log" | Chưa có lượt `night` nào đẩy lên, hoặc mất mạng/không có `origin`. Bảng chỉ hiện dữ liệu máy này |
+| `status` báo "Không đọc được nhánh log" | Chưa có phiên `run` nào đẩy lên, hoặc mất mạng/không có `origin`. Bảng chỉ hiện dữ liệu máy này |
 | `doctor` báo "spec đã sửa SAU khi agent chạy" | Bạn sửa task sau khi agent làm. Kết quả có thể không khớp spec mới → `kit.py set <id> queued` để chạy lại |
-| `doctor` báo "máy X: lượt chạy cuối ... cron có còn chạy?" | Kiểm tra `crontab -l`, `.agent-kit/night.log` trên máy X |
+| `doctor` báo "máy X: phiên cuối ... lịch chạy tự động có còn hoạt động?" | Chỉ xuất hiện khi đặt `STALE_RUN_HOURS`. Kiểm tra `crontab -l`, `.agent-kit/run.log` trên máy X |
 | `approve` báo "Acceptance trống" | Mục `# Acceptance` cần ít nhất một dòng `- [ ]` thật (ngoài dòng checks.sh, không còn `<!-- -->`) |
 | Task mãi không chạy | `depends_on` chưa `done`, hoặc đã hết `MAX_ATTEMPTS`. Xem `kit.py status` |
 | Hook báo lỗi "onFailure" / cờ lạ | Claude Code quá cũ. Cập nhật lên ≥ 2.1.295 |
-| Cron không tìm thấy `claude` | Đặt `CLAUDE_BIN` là đường dẫn tuyệt đối |
+| Chạy theo lịch không tìm thấy `claude` | Đặt `CLAUDE_BIN` là đường dẫn tuyệt đối |
 | Muốn biết agent bị chặn những gì | Xem `.agent-kit/logs/guard.log` |
 | Không tạo được issue/PR | `gh auth status`; kiểm tra quyền repo |
 

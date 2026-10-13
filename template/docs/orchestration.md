@@ -27,7 +27,7 @@ Quyền ghi được hook ép theo tên agent (`.claude/hooks/_common.py` → `R
 | "Làm task FEAT-01" | Kiểm tra task đã `approved` → `implementer` → `reviewer` → báo kết quả |
 | "Chấm lại nhánh X" | `reviewer` |
 | "Viết test ẩn cho task Y" | `test-writer` (thường do `kit.py approve` tự gọi) |
-| "Chạy hết hàng đợi" | **Không spawn hàng loạt.** Gợi ý `python3 runner/kit.py night --max N` |
+| "Chạy hết hàng đợi" | **Không spawn hàng loạt.** Gợi ý người dùng chạy `python3 runner/kit.py run --max N` |
 | "Tình hình thế nào?" / "Đêm qua làm được gì?" | Tự chạy `python3 runner/kit.py status` và `report` (chỉ đọc), tóm tắt cho người dùng |
 | "Vì sao task X fail?" | Chạy `python3 runner/kit.py report --task X`, tóm tắt lý do; đề xuất sửa task hoặc `set X queued` |
 | "Kiểm tra hệ thống" | Chạy `python3 runner/kit.py doctor`, giải thích từng ✗/! và cách xử lý. Chỉ chạy `doctor --fix` khi người dùng đồng ý |
@@ -70,4 +70,4 @@ design/<feature>/  ──planner──▶  tasks nháp  ──NGƯỜI DÙNG duy
   ──test-writer──▶ test ẩn  ──implementer──▶ code  ──reviewer──▶ PASS/FAIL  ──▶ PR (runner)
 ```
 
-Ban ngày bạn có thể chạy từng bước qua agent con để người dùng xem. Ban đêm `runner/kit.py night` chạy đúng chuỗi implementer → checks → test ẩn → reviewer mà không cần agent chủ.
+Bạn có thể chạy từng bước qua agent con khi người dùng muốn theo dõi. Hoặc người dùng chạy `python3 runner/kit.py run` (lúc nào cũng được, trên máy có Claude Code): nó tự chạy đúng chuỗi test-writer → implementer → checks → test ẩn → reviewer mà không cần agent chủ.
