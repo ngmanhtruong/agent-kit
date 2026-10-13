@@ -4,6 +4,7 @@ or outside the write area of the current role (env role or subagent type)."""
 import sys
 from pathlib import Path
 
+sys.dont_write_bytecode = True  # no __pycache__ inside .claude/hooks
 sys.path.insert(0, str(Path(__file__).parent))
 from _common import (ROLE_WRITE_ONLY, deny, is_protected, log, read_input,  # noqa: E402
                      rel, role_of, under, unlocked)

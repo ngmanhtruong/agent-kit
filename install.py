@@ -6,7 +6,7 @@
 - File chưa có → chép vào.
 - CLAUDE.md đã có → ghi CLAUDE.agent-kit.md để bạn tự gộp.
 - .claude/settings.json đã có → tự gộp permissions + hooks (giữ nguyên của bạn).
-- Thêm .agent-kit/ và runner/config.env vào .gitignore.
+- Thêm .agent-kit/, runner/config.env, __pycache__/ vào .gitignore.
 """
 import json
 import shutil
@@ -68,7 +68,7 @@ def main() -> None:
 
     gi = repo / ".gitignore"
     lines = gi.read_text().splitlines() if gi.exists() else []
-    add = [x for x in (".agent-kit/", "runner/config.env") if x not in lines]
+    add = [x for x in (".agent-kit/", "runner/config.env", "__pycache__/") if x not in lines]
     if add:
         gi.write_text("\n".join(lines + ["", "# agent-kit"] + add) + "\n")
 

@@ -28,6 +28,9 @@ Quyền ghi được hook ép theo tên agent (`.claude/hooks/_common.py` → `R
 | "Chấm lại nhánh X" | `reviewer` |
 | "Viết test ẩn cho task Y" | `test-writer` (thường do `kit.py approve` tự gọi) |
 | "Chạy hết hàng đợi" | **Không spawn hàng loạt.** Gợi ý `python3 runner/kit.py night --max N` |
+| "Tình hình thế nào?" / "Đêm qua làm được gì?" | Tự chạy `python3 runner/kit.py status` và `report` (chỉ đọc), tóm tắt cho người dùng |
+| "Vì sao task X fail?" | Chạy `python3 runner/kit.py report --task X`, tóm tắt lý do; đề xuất sửa task hoặc `set X queued` |
+| "Kiểm tra hệ thống" | Chạy `python3 runner/kit.py doctor`, giải thích từng ✗/! và cách xử lý. Chỉ chạy `doctor --fix` khi người dùng đồng ý |
 
 Yêu cầu không khớp dòng nào, hoặc thiếu thông tin để chọn: **hỏi người dùng**, đừng đoán.
 

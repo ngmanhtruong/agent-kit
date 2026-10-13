@@ -1,24 +1,35 @@
 #!/usr/bin/env python3
 """agent-kit runner: design → tasks → agents → graded PRs.
 
-  python3 runner/kit.py status                 bảng trạng thái
-  python3 runner/kit.py plan design/<feature>  planner chia design thành tasks nháp
-  python3 runner/kit.py approve <id|epic|all>  duyệt nháp → tạo GitHub Issue + bài test ẩn
-  python3 runner/kit.py night                  chạy các task sẵn sàng (dùng cho cron)
-  python3 runner/kit.py sync                   cập nhật trạng thái từ GitHub (PR merged → done)
-  python3 runner/kit.py import                 kéo GitHub Issue gắn nhãn 'agent-ready' thành task
+Kiểm tra (chỉ đọc — an toàn chạy trên bất kỳ máy nào, bất kỳ lúc nào):
+  python3 runner/kit.py status [--offline]       bảng trạng thái mọi task, gộp từ mọi máy
+  python3 runner/kit.py report [--last N]        tóm tắt các lượt chạy gần nhất (mọi máy)
+  python3 runner/kit.py report --task <id>       chi tiết một task: lý do, log, báo cáo, nhánh
+  python3 runner/kit.py doctor                   kiểm tra toàn bộ: cài đặt, tasks, trạng thái, đồng bộ
 
-Spec (do người duyệt) nằm trong tasks/*.md. Trạng thái chạy nằm trong
-.agent-kit/state.json và được phản chiếu lên nhãn GitHub Issue 'status:*',
-nên MacBook và mini PC không sửa đè file của nhau.
+Làm việc:
+  python3 runner/kit.py plan design/<feature>    planner chia design thành tasks nháp
+  python3 runner/kit.py approve <id|epic|all>    duyệt nháp → GitHub Issue + bài test ẩn
+  python3 runner/kit.py night [--max N]          chạy các task sẵn sàng (cron)
+  python3 runner/kit.py sync                     PR merged → done; cập nhật và chia sẻ trạng thái
+  python3 runner/kit.py import                   GitHub Issue nhãn 'agent-ready' → task nháp
+  python3 runner/kit.py set <id> <status>        đổi trạng thái tay (vd: failed → queued)
+  python3 runner/kit.py doctor --fix             sửa các lỗi an toàn (task kẹt 'running', sync)
+
+Dữ liệu dùng chung giữa các máy nằm trên nhánh git riêng `agent-kit/log`
+(không bao giờ đụng nhánh code): mỗi máy chỉ ghi file của chính nó
+(state/<máy>.json, runs/<máy>/...), nên không bao giờ xung đột. Đọc thì gộp
+theo bản ghi mới nhất. Spec (tasks/*.md) chỉ người sửa.
 Chỉ dùng thư viện chuẩn của Python 3.8+.
 """
 import argparse
 import datetime as dt
+import hashlib
 import json
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import time
@@ -26,6 +37,7 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
+sys.dont_write_bytecode = True
 ROOT = Path(__file__).resolve().parent.parent
 TASKS = ROOT / "tasks"
 STATE_DIR = ROOT / ".agent-kit"
@@ -40,7 +52,9 @@ def load_config() -> dict:
         "BASE_BRANCH": "main", "MAX_TASKS": "3", "TASK_TIMEOUT_MIN": "60",
         "MAX_ATTEMPTS": "2", "MAX_BUDGET_USD": "", "CLAUDE_BIN": "claude",
         "HOLDOUT_DIR": "", "HOLDOUT_CMD": "", "REVIEW": "1",
-        "GH_SYNC": "0", "GIT_PULL": "1",
+        "GH_SYNC": "0", "GIT_PULL": "1", "PUBLISH": "1",
+        "LOG_BRANCH": "agent-kit/log", "MACHINE_NAME": "", "LOCK_HOURS": "12",
+        "STALE_RUN_HOURS": "36",
         "TELEGRAM_BOT_TOKEN": "", "TELEGRAM_CHAT_ID": "",
         "WORKTREE_ROOT": str(ROOT.parent / f".agent-worktrees-{ROOT.name}"),
     }
@@ -56,10 +70,55 @@ def load_config() -> dict:
 
 
 CFG = load_config()
+HOST = re.sub(r"[^A-Za-z0-9_.-]", "-", CFG.get("MACHINE_NAME") or socket.gethostname().split(".")[0]) or "host"
+LOG_BRANCH = CFG["LOG_BRANCH"]
+LOG_REF = f"refs/remotes/origin/{LOG_BRANCH}"
 
 
 def flag(name: str) -> bool:
     return CFG.get(name, "0") == "1"
+
+
+def now() -> str:
+    return dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
+
+
+def age_hours(iso: str) -> float:
+    try:
+        t = dt.datetime.fromisoformat(iso)
+        if t.tzinfo is None:
+            t = t.replace(tzinfo=dt.timezone.utc)
+        return (dt.datetime.now(dt.timezone.utc) - t).total_seconds() / 3600
+    except Exception:
+        return float("inf")
+
+
+def local_time(iso: str) -> str:
+    try:
+        return dt.datetime.fromisoformat(iso).astimezone().strftime("%m-%d %H:%M")
+    except Exception:
+        return "-"
+
+
+# ───────────────────────── shell helpers ─────────────────────────
+def run(cmd, cwd=ROOT, timeout=None, env=None, check=False, shell=False):
+    r = subprocess.run(cmd, cwd=str(cwd), capture_output=True, text=True,
+                       timeout=timeout, env=env, shell=shell)
+    if check and r.returncode != 0:
+        raise RuntimeError(f"{cmd} failed:\n{r.stdout}\n{r.stderr}")
+    return r
+
+
+def git(args, cwd=ROOT, check=True):
+    return run(["git", *args], cwd=cwd, check=check)
+
+
+def gh(args, check=True):
+    return run(["gh", *args], check=check)
+
+
+def has_origin() -> bool:
+    return "origin" in git(["remote"], check=False).stdout.split()
 
 
 # ───────────────────────── tasks (markdown) ─────────────────────────
@@ -88,6 +147,7 @@ def parse_task(path: Path):
     meta.setdefault("type", "task")
     meta["_path"] = path
     meta["_body"] = m.group(2)
+    meta["_sha"] = hashlib.sha1(text.encode()).hexdigest()[:10]
     return meta
 
 
@@ -101,14 +161,20 @@ def set_front(path: Path, key: str, value) -> None:
     path.write_text(head + sep + body)
 
 
-def load_tasks() -> dict:
+def load_tasks(problems: list = None) -> dict:
     out = {}
-    for p in sorted(TASKS.rglob("*.md")):
-        if p.name.startswith("_"):
+    for p in sorted(TASKS.rglob("*.md")) if TASKS.exists() else []:
+        if p.name.startswith("_") or p.name == "README.md":
             continue
         t = parse_task(p)
-        if t and t.get("id"):
-            out[str(t["id"])] = t
+        if not t or not t.get("id"):
+            if problems is not None:
+                problems.append(f"{p.relative_to(ROOT)}: thiếu frontmatter hoặc id")
+            continue
+        tid = str(t["id"])
+        if tid in out and problems is not None:
+            problems.append(f"id trùng '{tid}': {out[tid]['_path'].relative_to(ROOT)} và {p.relative_to(ROOT)}")
+        out[tid] = t
     return out
 
 
@@ -119,6 +185,107 @@ def acceptance_ok(t: dict) -> bool:
     items = [l for l in sec.group(1).splitlines()
              if re.match(r"\s*- \[.\]", l) and "<!--" not in l and "checks.sh" not in l]
     return len(items) > 0
+
+
+# ───────────────────────── shared log branch ─────────────────────────
+def fetch_log() -> bool:
+    """Update the remote-tracking ref of the log branch. Never touches the working tree."""
+    if not has_origin():
+        return False
+    return git(["fetch", "-q", "origin", f"+refs/heads/{LOG_BRANCH}:{LOG_REF}"],
+               check=False).returncode == 0
+
+
+def log_ref_exists() -> bool:
+    return git(["rev-parse", "-q", "--verify", LOG_REF], check=False).returncode == 0
+
+
+def log_ls(prefix: str) -> list:
+    if not log_ref_exists():
+        return []
+    r = git(["ls-tree", "-r", "--name-only", LOG_REF, "--", prefix], check=False)
+    return [x for x in r.stdout.splitlines() if x]
+
+
+def log_read(path: str) -> str:
+    r = git(["show", f"{LOG_REF}:{path}"], check=False)
+    return r.stdout if r.returncode == 0 else ""
+
+
+def remote_hosts() -> dict:
+    """host → {"meta": {...}, "tasks": {...}} as published on the log branch."""
+    out = {}
+    for p in log_ls("state/"):
+        try:
+            out[Path(p).stem] = json.loads(log_read(p))
+        except Exception:
+            pass
+    return out
+
+
+def remote_lock() -> dict:
+    try:
+        return json.loads(log_read("lock.json")) if log_ref_exists() else {}
+    except Exception:
+        return {}
+
+
+class LockHeld(Exception):
+    pass
+
+
+class LogBranch:
+    """Write side of the log branch. Each host writes only its own files,
+    so concurrent pushes from different machines never conflict; a rejected
+    push is simply retried on top of the new remote tip."""
+
+    def __init__(self):
+        self.dir = Path(CFG["WORKTREE_ROOT"]) / "_agent-kit-log"
+        self.tmp_branch = f"agent-kit-log-tmp-{HOST}"
+
+    def enabled(self) -> bool:
+        return flag("PUBLISH") and has_origin()
+
+    def _cleanup(self):
+        if self.dir.exists():
+            git(["worktree", "remove", "--force", str(self.dir)], check=False)
+        git(["worktree", "prune"], check=False)
+        git(["branch", "-D", self.tmp_branch], check=False)
+
+    def _prepare(self):
+        self._cleanup()
+        self.dir.parent.mkdir(parents=True, exist_ok=True)
+        if fetch_log():
+            git(["worktree", "add", "-q", "--detach", str(self.dir), LOG_REF])
+        else:  # first publish ever: start an orphan branch with no code in it
+            git(["worktree", "add", "-q", "--detach", str(self.dir), "HEAD"])
+            git(["checkout", "-q", "--orphan", self.tmp_branch], cwd=self.dir)
+            git(["rm", "-rfq", "."], cwd=self.dir, check=False)
+
+    def commit(self, msg: str, mutate) -> bool:
+        if not self.enabled():
+            return False
+        try:
+            for attempt in range(4):
+                self._prepare()
+                mutate(self.dir)  # may raise LockHeld
+                git(["add", "-A"], cwd=self.dir)
+                if not git(["status", "--porcelain"], cwd=self.dir).stdout.strip():
+                    return True
+                git(["-c", "core.hooksPath=/dev/null", "-c", "user.name=agent-kit",
+                     "-c", "user.email=agent-kit@localhost", "commit", "-qm", f"[{HOST}] {msg}"],
+                    cwd=self.dir)
+                if git(["push", "-q", "origin", f"HEAD:refs/heads/{LOG_BRANCH}"],
+                       cwd=self.dir, check=False).returncode == 0:
+                    return True
+                time.sleep(2 + attempt * 3)
+            print(f"! không push được nhánh {LOG_BRANCH} sau 4 lần thử")
+            return False
+        finally:
+            self._cleanup()
+
+
+LOG = LogBranch()
 
 
 # ───────────────────────── runtime state ─────────────────────────
@@ -134,6 +301,24 @@ def save_state(st: dict) -> None:
     STATE_FILE.write_text(json.dumps(st, indent=2, ensure_ascii=False))
 
 
+def merge_states(local: dict, hosts: dict) -> dict:
+    """Last-writer-wins per task, by the 'updated' UTC timestamp."""
+    out = {k: dict(v) for k, v in local.items()}
+    for data in hosts.values():
+        for tid, rec in (data.get("tasks") or {}).items():
+            cur = out.get(tid)
+            if not cur or str(rec.get("updated", "")) > str(cur.get("updated", "")):
+                out[tid] = dict(rec)
+    return out
+
+
+def view_state(fetch: bool = True):
+    """Merged view of local + every machine's published state. Read-only."""
+    fetched = fetch_log() if fetch else False
+    hosts = remote_hosts()
+    return merge_states(load_state(), hosts), hosts, fetched
+
+
 def status_of(t: dict, st: dict) -> str:
     s = st.get(str(t["id"]), {}).get("status")
     if s:
@@ -144,30 +329,57 @@ def status_of(t: dict, st: dict) -> str:
 def set_status(t: dict, st: dict, status: str, **extra) -> None:
     rec = st.setdefault(str(t["id"]), {})
     old = rec.get("status")
-    rec.update(status=status, updated=dt.datetime.now().isoformat(timespec="seconds"), **extra)
+    rec.update(status=status, updated=now(), host=HOST, **extra)
     save_state(st)
     if flag("GH_SYNC") and t.get("issue") and old != status:
         gh(["issue", "edit", str(t["issue"]), "--add-label", f"status:{status}"]
            + (["--remove-label", f"status:{old}"] if old else []), check=False)
 
 
-# ───────────────────────── shell helpers ─────────────────────────
-def run(cmd, cwd=ROOT, timeout=None, env=None, check=False, shell=False):
-    r = subprocess.run(cmd, cwd=str(cwd), capture_output=True, text=True,
-                       timeout=timeout, env=env, shell=shell)
-    if check and r.returncode != 0:
-        raise RuntimeError(f"{cmd} failed:\n{r.stdout}\n{r.stderr}")
-    return r
+def publish(st: dict, run_dir: Path = None, meta: dict = None, msg: str = "state") -> bool:
+    """Share this machine's state (and a run's logs) on the log branch."""
+    def mutate(d: Path):
+        sf = d / "state" / f"{HOST}.json"
+        sf.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            old_meta = json.loads(sf.read_text()).get("meta", {})
+        except Exception:
+            old_meta = {}
+        m = dict(old_meta, host=HOST, last_seen=now(), **(meta or {}))
+        sf.write_text(json.dumps({"meta": m, "tasks": st}, indent=2, ensure_ascii=False))
+        if run_dir and run_dir.exists():
+            dest = d / "runs" / HOST / run_dir.name
+            shutil.copytree(str(run_dir), str(dest), dirs_exist_ok=True)
+    return LOG.commit(msg, mutate)
 
 
-def git(args, cwd=ROOT, check=True):
-    return run(["git", *args], cwd=cwd, check=check)
+def acquire_lock() -> None:
+    def mutate(d: Path):
+        p = d / "lock.json"
+        if p.exists():
+            try:
+                cur = json.loads(p.read_text())
+            except Exception:
+                cur = {}
+            if cur.get("host") != HOST and age_hours(cur.get("started", "")) < float(CFG["LOCK_HOURS"]):
+                raise LockHeld(f"{cur.get('host')} đang chạy từ {local_time(cur.get('started', ''))}")
+        p.write_text(json.dumps({"host": HOST, "pid": os.getpid(), "started": now()}))
+    LOG.commit("lock", mutate)
 
 
-def gh(args, check=True):
-    return run(["gh", *args], check=check)
+def release_lock() -> None:
+    def mutate(d: Path):
+        p = d / "lock.json"
+        if p.exists():
+            try:
+                if json.loads(p.read_text()).get("host") == HOST:
+                    p.unlink()
+            except Exception:
+                p.unlink()
+    LOG.commit("unlock", mutate)
 
 
+# ───────────────────────── claude ─────────────────────────
 def claude(prompt: str, role: str, cwd: Path, agent: str = "", timeout_min: int = 60,
            extra_env: dict = None) -> dict:
     cmd = [CFG["CLAUDE_BIN"], "-p", prompt, "--output-format", "json",
@@ -198,20 +410,290 @@ class LimitHit(Exception):
     pass
 
 
-# ───────────────────────── commands ─────────────────────────
-def cmd_status(_args):
-    tasks, st = load_tasks(), load_state()
-    rows = [("ID", "TYPE", "STATUS", "TRY", "DEPENDS", "ISSUE", "PR")]
+# ───────────────────────── read-only commands ─────────────────────────
+def table(rows):
+    w = [max(len(str(r[i])) for r in rows) for i in range(len(rows[0]))]
+    for r in rows:
+        print("  ".join(str(c).ljust(w[i]) for i, c in enumerate(r)).rstrip())
+
+
+def stale_running(rec: dict, lock: dict) -> bool:
+    if rec.get("status") != "running":
+        return False
+    held = lock.get("host") == rec.get("host") and age_hours(lock.get("started", "")) < float(CFG["LOCK_HOURS"])
+    if rec.get("host") == HOST and (STATE_DIR / "night.lock").exists():
+        held = True  # this machine is running it right now
+    return not held and age_hours(rec.get("updated", "")) > 1
+
+
+def cmd_status(args):
+    st, hosts, fetched = view_state(fetch=not getattr(args, "offline", False))
+    tasks, lock = load_tasks(), remote_lock()
+    rows = [("ID", "TYPE", "STATUS", "TRY", "DEPENDS", "MÁY", "CẬP NHẬT", "PR / NHÁNH")]
+    counts = {}
     for t in sorted(tasks.values(), key=lambda x: (str(x.get("epic", "")), x["priority"], str(x["id"]))):
         rec = st.get(str(t["id"]), {})
-        rows.append((str(t["id"]), t["type"], status_of(t, st), str(rec.get("attempts", 0)),
-                     ",".join(t["depends_on"]) or "-", str(t.get("issue") or "-"),
-                     rec.get("pr", "-")))
-    w = [max(len(r[i]) for r in rows) for i in range(len(rows[0]))]
-    for r in rows:
-        print("  ".join(c.ljust(w[i]) for i, c in enumerate(r)))
+        s = status_of(t, st)
+        if stale_running(rec, lock):
+            s = "running?"
+        counts[s] = counts.get(s, 0) + 1
+        rows.append((t["id"], t["type"], s, rec.get("attempts", 0), ",".join(t["depends_on"]) or "-",
+                     rec.get("host", "-"), local_time(rec.get("updated", "")),
+                     rec.get("pr") or rec.get("branch") or "-"))
+    if len(rows) == 1:
+        print("Chưa có task nào trong tasks/.")
+    else:
+        table(rows)
+    print("\nTổng: " + ", ".join(f"{k} {v}" for k, v in sorted(counts.items())) if counts else "")
+    for h, d in sorted(hosts.items()):
+        m = d.get("meta", {})
+        last = local_time(m["last_run"]) if m.get("last_run") else "chưa chạy đêm"
+        print(f"Máy {h}: lượt chạy cuối {last} · cập nhật {local_time(m.get('last_seen', ''))}")
+    if lock:
+        print(f"🔒 Đang chạy: {lock.get('host')} từ {local_time(lock.get('started', ''))}")
+    if not fetched and not getattr(args, "offline", False):
+        print("(!) Không đọc được nhánh log từ origin — chỉ hiển thị dữ liệu trên máy này.")
+    if counts.get("running?"):
+        print("(!) 'running?' = task kẹt (lượt chạy đã chết). Chạy: python3 runner/kit.py doctor --fix")
 
 
+def run_dirs() -> list:
+    """[(name, host, source)] newest first; source 'remote' (log branch) or 'local'."""
+    seen, out = set(), []
+    for p in log_ls("runs/"):
+        parts = p.split("/")
+        if len(parts) >= 4 and (parts[1], parts[2]) not in seen:
+            seen.add((parts[1], parts[2]))
+            out.append((parts[2], parts[1], "remote"))
+    for d in (STATE_DIR / "runs").glob("*") if (STATE_DIR / "runs").exists() else []:
+        if d.is_dir() and (HOST, d.name) not in seen:
+            out.append((d.name, HOST, "local"))
+    return sorted(out, reverse=True)
+
+
+def run_file(host: str, name: str, source: str, rel: str) -> str:
+    if source == "remote":
+        return log_read(f"runs/{host}/{name}/{rel}")
+    p = STATE_DIR / "runs" / name / rel
+    return p.read_text() if p.exists() else ""
+
+
+def tail(text: str, n: int = 25) -> str:
+    lines = text.rstrip().splitlines()
+    return "\n".join(("    " + l) for l in lines[-n:]) if lines else "    (trống)"
+
+
+def cmd_report(args):
+    fetch_log()
+    runs = run_dirs()
+    if not runs:
+        print("Chưa có lượt chạy nào.")
+        return
+    if args.task:
+        tid = args.task
+        hits = [(n, h, s) for n, h, s in runs if run_file(h, n, s, f"{tid}/review.json")]
+        if not hits:
+            print(f"Không tìm thấy lượt chạy nào của {tid}.")
+            return
+        st, _, _ = view_state(fetch=False)
+        rec = st.get(tid, {})
+        print(f"══ {tid} · trạng thái hiện tại: {rec.get('status', '-')} · thử {rec.get('attempts', 0)} lần")
+        if rec.get("pr"):
+            print(f"PR: {rec['pr']}")
+        for n, h, s in hits[: args.last or 3]:
+            meta = {}
+            try:
+                meta = json.loads(run_file(h, n, s, f"{tid}/result.json") or "{}")
+            except Exception:
+                pass
+            print(f"\n── Lượt {n} trên {h} · {'PASS' if meta.get('passed') else 'FAIL'}"
+                  f" · nhánh {meta.get('branch', '-')} · base {meta.get('base_sha', '-')}"
+                  f" · spec {meta.get('spec_sha', '-')}")
+            for r in meta.get("reasons", []):
+                print(f"  ✗ {r}")
+            review = run_file(h, n, s, f"{tid}/review.json")
+            print("  Reviewer:\n" + tail(review, 20))
+            for f, label in [(f"{tid}.md", "Báo cáo worker"), ("checks.log", "checks.sh"),
+                             ("holdout.log", "Test ẩn"), ("worker.txt", "Worker (cuối)")]:
+                txt = run_file(h, n, s, f"{tid}/{f}")
+                if txt:
+                    print(f"  {label}:\n" + tail(txt, 30 if f.endswith(".md") else 15))
+        return
+    for n, h, s in runs[: args.last or 3]:
+        print(f"══ {n} · máy {h}{' (chỉ có trên máy này)' if s == 'local' else ''}")
+        print(run_file(h, n, s, "SUMMARY.md").strip() or "  (không có SUMMARY.md — lượt chạy bị ngắt?)")
+        print()
+    print("Chi tiết một task: python3 runner/kit.py report --task <id>")
+
+
+def claude_version_ok():
+    if not shutil.which(CFG["CLAUDE_BIN"]) and not Path(CFG["CLAUDE_BIN"]).exists():
+        return None, "không tìm thấy"
+    r = run([CFG["CLAUDE_BIN"], "--version"], check=False)
+    m = re.search(r"(\d+)\.(\d+)\.(\d+)", r.stdout)
+    if not m:
+        return None, r.stdout.strip() or "không đọc được phiên bản"
+    v = tuple(int(x) for x in m.groups())
+    return v >= (2, 1, 295), ".".join(m.groups())
+
+
+def find_cycle(tasks: dict):
+    color = {}
+
+    def visit(n, path):
+        color[n] = 1
+        for d in tasks[n]["depends_on"]:
+            if d not in tasks:
+                continue
+            if color.get(d) == 1:
+                return path + [d]
+            if not color.get(d):
+                c = visit(d, path + [d])
+                if c:
+                    return c
+        color[n] = 2
+        return None
+
+    for n in tasks:
+        if not color.get(n):
+            c = visit(n, [n])
+            if c:
+                return c
+    return None
+
+
+def cmd_doctor(args):
+    out = {"✗": 0, "!": 0}
+
+    def say(mark, msg):
+        if mark in out:
+            out[mark] += 1
+        print(f"  {mark} {msg}")
+
+    print("Cài đặt")
+    if (ROOT / "runner" / "config.env").exists():
+        say("✓", "runner/config.env có")
+    else:
+        say("✗", "thiếu runner/config.env → cp runner/config.env.example runner/config.env")
+    ok, v = claude_version_ok()
+    say("✓" if ok else ("✗" if ok is None else "!"), f"claude {v}" + ("" if ok else " (cần ≥ 2.1.295)"))
+    if flag("GH_SYNC"):
+        r = run(["gh", "auth", "status"], check=False) if shutil.which("gh") else None
+        say("✓" if r and r.returncode == 0 else "✗", "gh đã đăng nhập" if r and r.returncode == 0 else "gh chưa cài/chưa đăng nhập (GH_SYNC=1)")
+    tracked = git(["ls-files", ".claude/settings.json", "eval/checks.sh", "runner/kit.py"], check=False).stdout.split()
+    say("✓" if len(tracked) == 3 else "✗", "khung agent-kit đã commit" if len(tracked) == 3
+        else "khung agent-kit chưa commit đủ (.claude/, eval/, runner/) → worker sẽ chạy không rào chắn")
+    chk = ROOT / "eval" / "checks.sh"
+    if chk.exists() and re.search(r"^\s*step ", chk.read_text(), re.M):
+        say("✓", "eval/checks.sh đã cấu hình")
+    else:
+        say("✗", "eval/checks.sh chưa có bước nào → mọi task sẽ FAIL")
+    if has_origin():
+        say("✓", "có remote origin")
+    else:
+        say("!", "không có remote origin → các máy không chia sẻ được trạng thái")
+
+    print("\nĐồng bộ giữa các máy")
+    fetched = fetch_log()
+    if fetched:
+        say("✓", f"đọc được nhánh {LOG_BRANCH}")
+    elif has_origin():
+        say("!", f"chưa có nhánh {LOG_BRANCH} trên origin (sẽ được tạo ở lượt night đầu tiên)")
+    base = CFG["BASE_BRANCH"]
+    if has_origin() and git(["fetch", "-q", "origin", base], check=False).returncode == 0:
+        behind = git(["rev-list", "--count", f"HEAD..origin/{base}"], check=False).stdout.strip()
+        ahead = git(["rev-list", "--count", f"origin/{base}..HEAD"], check=False).stdout.strip()
+        if behind not in ("", "0"):
+            say("!", f"máy này chậm {behind} commit so với origin/{base} → git pull")
+        elif ahead not in ("", "0"):
+            say("!", f"máy này có {ahead} commit chưa push → git push (máy chạy đêm sẽ không thấy)")
+        else:
+            say("✓", f"khớp với origin/{base}")
+    dirty = git(["status", "--porcelain", "--", "tasks"], check=False).stdout.strip()
+    if dirty:
+        say("!", "tasks/ có thay đổi chưa commit → máy chạy đêm sẽ không thấy")
+    hosts = remote_hosts()
+    for h, d in sorted(hosts.items()):
+        last = d.get("meta", {}).get("last_run", "")
+        if last and age_hours(last) > float(CFG["STALE_RUN_HOURS"]):
+            say("!", f"máy {h}: lượt chạy cuối {local_time(last)} — cron có còn chạy?")
+        elif last:
+            say("✓", f"máy {h}: lượt chạy cuối {local_time(last)}")
+    lock = remote_lock()
+    if lock:
+        if age_hours(lock.get("started", "")) < float(CFG["LOCK_HOURS"]):
+            say("✓", f"đang chạy trên {lock.get('host')} từ {local_time(lock.get('started', ''))}")
+        else:
+            say("!", f"khoá cũ của {lock.get('host')} ({local_time(lock.get('started', ''))}) — lượt đó đã chết; sẽ tự hết hạn")
+
+    print("\nTasks")
+    problems = []
+    tasks = load_tasks(problems)
+    for p in problems:
+        say("✗", p)
+    for t in tasks.values():
+        for d in t["depends_on"]:
+            if d not in tasks:
+                say("✗", f"{t['id']}: depends_on '{d}' không tồn tại")
+    cyc = find_cycle(tasks)
+    if cyc:
+        say("✗", "vòng phụ thuộc: " + " → ".join(cyc))
+    for t in tasks.values():
+        if t.get("status") == "approved" and t["type"] != "epic":
+            if not acceptance_ok(t):
+                say("✗", f"{t['id']}: đã duyệt nhưng Acceptance trống")
+            if flag("GH_SYNC") and not t.get("issue"):
+                say("!", f"{t['id']}: đã duyệt nhưng chưa có GitHub Issue")
+            if t.get("holdout") is True and CFG.get("HOLDOUT_DIR") and not (Path(CFG["HOLDOUT_DIR"]) / str(t["id"])).exists():
+                say("!", f"{t['id']}: holdout: true nhưng máy này không có test ẩn (bình thường nếu máy khác chạy đêm)")
+    if not problems and tasks:
+        say("✓", f"{len(tasks)} task đọc được")
+
+    print("\nTrạng thái chạy")
+    st = merge_states(load_state(), hosts)
+    stale, remote_heads = [], None
+    if has_origin():
+        r = git(["ls-remote", "--heads", "origin", "agent/*"], check=False)
+        remote_heads = {l.split("refs/heads/")[-1] for l in r.stdout.splitlines()}
+    for t in tasks.values():
+        tid, rec = str(t["id"]), st.get(str(t["id"]), {})
+        s = rec.get("status")
+        if stale_running(rec, lock):
+            stale.append(t)
+            say("✗", f"{tid}: kẹt 'running' từ {local_time(rec.get('updated', ''))} trên {rec.get('host')} → doctor --fix")
+        if s in ("review", "failed") and rec.get("spec_sha") and rec["spec_sha"] != t["_sha"]:
+            say("!", f"{tid}: spec đã sửa SAU khi agent chạy → kết quả có thể không còn đúng ý (approve/set lại)")
+        if s == "failed":
+            say("!", f"{tid}: failed sau {rec.get('attempts', 0)} lần → xem: kit.py report --task {tid}")
+        if remote_heads is not None and rec.get("branch") and s in ("review", "failed") \
+                and rec["branch"] not in remote_heads and flag("PUBLISH"):
+            say("!", f"{tid}: nhánh {rec['branch']} không có trên origin")
+        if s == "review" and rec.get("pr") and flag("GH_SYNC"):
+            r = gh(["pr", "view", rec["pr"], "--json", "state", "-q", ".state"], check=False)
+            if r.stdout.strip() in ("MERGED", "CLOSED"):
+                say("!", f"{tid}: PR đã {r.stdout.strip().lower()} nhưng chưa sync → kit.py sync")
+    if not stale and st:
+        say("✓", "không có task kẹt")
+    blocks = STATE_DIR / "logs" / "guard.log"
+    if blocks.exists():
+        n = len(blocks.read_text().splitlines())
+        say("✓", f"hook đã chặn {n} hành động trên máy này (.agent-kit/logs/guard.log)")
+
+    if args.fix:
+        print("\nSửa")
+        local = load_state()
+        for t in stale:
+            local[str(t["id"])] = dict(st.get(str(t["id"]), {}))
+            set_status(t, local, "queued", last_fail="- lượt chạy trước bị ngắt giữa chừng")
+            print(f"  ↺ {t['id']} → queued")
+        cmd_sync(None, quiet=True)
+        print("  ↺ đã sync")
+
+    print(f"\nKết quả: {out['✗']} lỗi, {out['!']} cảnh báo")
+    sys.exit(1 if out["✗"] else 0)
+
+
+# ───────────────────────── write commands ─────────────────────────
 def cmd_plan(args):
     d = (ROOT / args.design_dir).resolve()
     if not d.is_dir():
@@ -236,7 +718,8 @@ def ensure_labels():
 
 
 def cmd_approve(args):
-    tasks, st = load_tasks(), load_state()
+    tasks = load_tasks()
+    st, _, _ = view_state()
     key = args.target
     picked = [t for t in tasks.values()
               if t.get("status") == "draft" and
@@ -264,12 +747,12 @@ def cmd_approve(args):
             else:
                 print(f"  ! không tạo được issue: {r.stderr.strip()[:200]}")
         if t["type"] != "epic":
-            st.setdefault(str(t["id"]), {})
-            set_status(t, st, "queued")
+            set_status(t, st, "queued", attempts=0, last_fail=None)
             if t.get("holdout") is True and CFG.get("HOLDOUT_DIR"):
                 write_holdout(t)
         print(f"✓ {t['id']} approved" + (f" (#{t['issue']})" if t.get("issue") else ""))
-    print("\nNhớ commit + push thư mục tasks/ để mini PC kéo về.")
+    publish(st, msg="approve")
+    print("\nNhớ commit + push thư mục tasks/ để máy chạy đêm kéo về.")
 
 
 def write_holdout(t: dict):
@@ -290,9 +773,9 @@ def write_holdout(t: dict):
 
 
 def gh_snapshot() -> dict:
-    """issue number → {labels, state} for every agent-kit issue (one API call)."""
+    """issue number → {labels, state, updatedAt} for every agent-kit issue (one API call)."""
     r = gh(["issue", "list", "--label", "agent-kit", "--state", "all", "--limit", "1000",
-            "--json", "number,labels,state"], check=False)
+            "--json", "number,labels,state,updatedAt"], check=False)
     try:
         return {str(i["number"]): i for i in json.loads(r.stdout or "[]")}
     except Exception:
@@ -300,22 +783,25 @@ def gh_snapshot() -> dict:
 
 
 def cmd_sync(_args=None, quiet=False):
-    tasks, st = load_tasks(), load_state()
+    tasks = load_tasks()
+    st, _, _ = view_state()
+    save_state(st)
     snap = gh_snapshot() if flag("GH_SYNC") else {}
     for t in tasks.values():
         tid = str(t["id"])
         rec = st.get(tid, {})
-        # 1) pull status from GitHub labels (the other machine may have moved it)
+        # 1) a label changed on GitHub after our last record (e.g. edited by hand) wins
         issue = snap.get(str(t.get("issue") or ""))
         if issue:
             gh_status = next((l["name"][7:] for l in issue["labels"]
                               if l["name"].startswith("status:")), None)
-            if gh_status and gh_status != rec.get("status"):
-                st.setdefault(tid, {})["status"] = gh_status
+            if gh_status in STATUSES and gh_status != rec.get("status") \
+                    and str(issue.get("updatedAt", "")).replace("Z", "+00:00") > str(rec.get("updated", "")):
+                set_status(t, st, gh_status, note="đổi từ nhãn GitHub")
         # 2) review → done when PR merged; closed without merge → failed
-        if st.get(tid, {}).get("status") == "review" and st[tid].get("pr") and flag("GH_SYNC"):
-            r = gh(["pr", "view", st[tid]["pr"], "--json", "state", "-q", ".state"], check=False)
-            state = r.stdout.strip()
+        rec = st.get(tid, {})
+        if rec.get("status") == "review" and rec.get("pr") and flag("GH_SYNC"):
+            state = gh(["pr", "view", rec["pr"], "--json", "state", "-q", ".state"], check=False).stdout.strip()
             if state == "MERGED":
                 set_status(t, st, "done")
             elif state == "CLOSED":
@@ -323,11 +809,28 @@ def cmd_sync(_args=None, quiet=False):
     # 3) epic done when all its tasks are done
     for e in [t for t in tasks.values() if t["type"] == "epic"]:
         kids = [t for t in tasks.values() if t.get("epic") == e.get("epic", e["id"]) and t["type"] != "epic"]
-        if kids and all(status_of(k, st) == "done" for k in kids):
+        if kids and all(status_of(k, st) == "done" for k in kids) and status_of(e, st) != "done":
             set_status(e, st, "done")
     save_state(st)
+    publish(st, msg="sync")
     if not quiet:
-        cmd_status(None)
+        cmd_status(argparse.Namespace(offline=True))
+
+
+def cmd_set(args):
+    tasks = load_tasks()
+    t = tasks.get(args.id)
+    if not t:
+        sys.exit(f"Không có task '{args.id}'.")
+    if args.status not in STATUSES:
+        sys.exit(f"Trạng thái phải là một trong: {', '.join(STATUSES)}")
+    st, _, _ = view_state()
+    extra = {"note": f"đặt tay bởi {HOST}"}
+    if args.status == "queued":
+        extra.update(attempts=0, last_fail=None)
+    set_status(t, st, args.status, **extra)
+    publish(st, msg=f"set {args.id}={args.status}")
+    print(f"{args.id} → {args.status}")
 
 
 def cmd_import(_args):
@@ -355,7 +858,7 @@ def cmd_import(_args):
 def ready_tasks(tasks, st):
     out = []
     for t in tasks.values():
-        if t["type"] == "epic" or status_of(t, st) != "queued":
+        if t["type"] == "epic" or t.get("status") != "approved" or status_of(t, st) != "queued":
             continue
         if st.get(str(t["id"]), {}).get("attempts", 0) >= int(CFG["MAX_ATTEMPTS"]):
             continue
@@ -390,7 +893,10 @@ def run_task(t, st, run_dir: Path) -> dict:
     tid, base = str(t["id"]), CFG["BASE_BRANCH"]
     rec = st.setdefault(tid, {})
     attempt = rec.get("attempts", 0) + 1
-    set_status(t, st, "running", attempts=attempt)
+    base_sha = git(["rev-parse", "--short", base]).stdout.strip()
+    set_status(t, st, "running", attempts=attempt, spec_sha=t["_sha"], base_sha=base_sha,
+               run=run_dir.name)
+    publish(st, msg=f"start {tid}")
     branch = f"agent/{tid}-a{attempt}"
     wt = Path(CFG["WORKTREE_ROOT"]) / tid
     if wt.exists():
@@ -411,8 +917,7 @@ def run_task(t, st, run_dir: Path) -> dict:
                timeout_min=int(CFG["TASK_TIMEOUT_MIN"]))
     (out / "worker.txt").write_text(w["result"])
     if w["limit"]:
-        rec["attempts"] = attempt - 1
-        set_status(t, st, "queued")
+        set_status(t, st, "queued", attempts=attempt - 1)
         git(["worktree", "remove", "--force", str(wt)], check=False)
         raise LimitHit(w["result"][-300:])
 
@@ -437,6 +942,8 @@ def run_task(t, st, run_dir: Path) -> dict:
               f"=== TASK ===\n{t['_path'].read_text()}")
         rv = claude(rp, role="reviewer", cwd=wt, agent="reviewer", timeout_min=20)
         if rv["limit"]:
+            set_status(t, st, "queued", attempts=attempt - 1)
+            git(["worktree", "remove", "--force", str(wt)], check=False)
             raise LimitHit(rv["result"][-300:])
         m = re.search(r"\{.*\}", rv["result"], re.S)
         try:
@@ -457,18 +964,23 @@ def run_task(t, st, run_dir: Path) -> dict:
         ([] if checks_ok else ["eval/checks.sh FAIL"]) +
         ([] if hold_ok is not False else ["bài test ẩn FAIL"]) +
         list(review.get("reasons", [])))
-    result = {"id": tid, "passed": passed, "reasons": reasons, "branch": branch,
-              "cost": w["cost"], "risks": review.get("risks", []), "pr": ""}
+
+    # Every attempt's branch goes to origin so any machine can inspect it.
+    pushed = has_origin() and flag("PUBLISH") and \
+        git(["push", "-q", "-u", "origin", branch, "--force"], cwd=wt, check=False).returncode == 0
+    result = {"id": tid, "passed": passed, "reasons": reasons, "branch": branch, "pushed": pushed,
+              "base_sha": base_sha, "spec_sha": t["_sha"], "attempt": attempt, "host": HOST,
+              "cost": w["cost"], "risks": review.get("risks", []), "pr": "", "finished": now()}
 
     if passed:
         pr = ""
-        if flag("GH_SYNC"):
-            git(["push", "-u", "origin", branch, "--force"], cwd=wt, check=False)
+        if flag("GH_SYNC") and pushed:
             report = (out / f"{tid}.md").read_text() if (out / f"{tid}.md").exists() else ""
             body = (f"{report}\n\n---\n**Chấm tự động**: checks PASS · test ẩn "
                     f"{'PASS' if hold_ok else 'không có'} · reviewer {review.get('verdict')}\n"
                     f"**Rủi ro**: {'; '.join(review.get('risks', [])) or '-'}\n"
-                    f"**Nên xem kỹ**: {'; '.join(review.get('human_should_check', [])) or '-'}\n\n"
+                    f"**Nên xem kỹ**: {'; '.join(review.get('human_should_check', [])) or '-'}\n"
+                    f"**Chạy trên**: {HOST} · base `{base_sha}` · spec `{t['_sha']}`\n\n"
                     + (f"Closes #{t['issue']}" if t.get("issue") else ""))
             r = gh(["pr", "create", "--base", base, "--head", branch,
                     "--title", f"[{tid}] agent", "--body", body], check=False)
@@ -482,8 +994,10 @@ def run_task(t, st, run_dir: Path) -> dict:
         set_status(t, st, "failed" if give_up else "queued", last_fail=note, branch=branch)
         if give_up and flag("GH_SYNC") and t.get("issue"):
             gh(["issue", "comment", str(t["issue"]), "--body",
-                f"Agent thử {attempt} lần vẫn FAIL. Nhánh `{branch}` (chỉ có trên máy chạy).\n{note}"], check=False)
+                f"Agent thử {attempt} lần vẫn FAIL. Nhánh `{branch}`.\n{note}\n\n"
+                f"Chi tiết: `python3 runner/kit.py report --task {tid}`"], check=False)
             gh(["issue", "edit", str(t["issue"]), "--add-label", "needs-human"], check=False)
+    (out / "result.json").write_text(json.dumps(result, indent=2, ensure_ascii=False))
     git(["worktree", "remove", "--force", str(wt)], check=False)
     return result
 
@@ -502,18 +1016,34 @@ def notify(text: str):
 def cmd_night(args):
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     lock = STATE_DIR / "night.lock"
-    if lock.exists() and time.time() - lock.stat().st_mtime < 12 * 3600:
-        sys.exit("Đang có một lượt chạy khác (night.lock).")
+    if lock.exists() and age_hours(dt.datetime.fromtimestamp(lock.stat().st_mtime, dt.timezone.utc).isoformat()) < float(CFG["LOCK_HOURS"]):
+        sys.exit("Đang có một lượt chạy khác trên máy này (night.lock).")
     lock.write_text(str(os.getpid()))
+    remote_locked = False
     try:
         if not git(["ls-files", ".claude/settings.json"], check=False).stdout.strip():
             sys.exit("agent-kit chưa được commit lên repo → worktree sẽ không có rào chắn. Commit trước.")
-        if flag("GIT_PULL") and not git(["status", "--porcelain", "--untracked-files=no"]).stdout.strip():
-            git(["pull", "--ff-only"], check=False)
+        if flag("GIT_PULL") and has_origin():
+            if git(["status", "--porcelain", "--untracked-files=no"]).stdout.strip():
+                msg = "Dừng: máy chạy đêm có thay đổi chưa commit → không pull được spec mới. Dọn sạch rồi chạy lại."
+                notify(f"agent-kit · {ROOT.name} · {HOST}\n{msg}")
+                sys.exit(msg)
+            r = git(["pull", "-q", "--ff-only"], check=False)
+            if r.returncode != 0:
+                msg = f"Dừng: git pull --ff-only thất bại ({r.stderr.strip()[:200]}). Máy chạy đêm không được có commit riêng."
+                notify(f"agent-kit · {ROOT.name} · {HOST}\n{msg}")
+                sys.exit(msg)
+        try:
+            acquire_lock()
+            remote_locked = LOG.enabled()
+        except LockHeld as e:
+            sys.exit(f"Máy khác đang chạy: {e}")
         cmd_sync(quiet=True)
-        tasks, st = load_tasks(), load_state()
+        tasks = load_tasks()
+        st, _, _ = view_state(fetch=False)
         todo = ready_tasks(tasks, st)[: args.max or int(CFG["MAX_TASKS"])]
-        run_dir = STATE_DIR / "runs" / dt.datetime.now().strftime("%Y-%m-%d_%H%M")
+        started = now()
+        run_dir = STATE_DIR / "runs" / (dt.datetime.now().strftime("%Y-%m-%d_%H%M%S") + f"_{HOST}")
         run_dir.mkdir(parents=True, exist_ok=True)
         results, stopped = [], ""
         for t in todo:
@@ -526,33 +1056,49 @@ def cmd_night(args):
             except Exception as e:
                 set_status(t, st, "queued", last_fail=f"- lỗi runner: {e}")
                 results.append({"id": str(t["id"]), "passed": False, "reasons": [f"lỗi runner: {e}"], "pr": "", "cost": 0})
-        lines = [f"agent-kit · {ROOT.name} · {dt.date.today()}"]
+            publish(st, run_dir, msg=f"done {t['id']}")
+        lines = [f"agent-kit · {ROOT.name} · {HOST} · {dt.datetime.now().strftime('%Y-%m-%d %H:%M')}"]
         for r in results:
             mark = "✅" if r["passed"] else "❌"
-            lines.append(f"{mark} {r['id']} {r.get('pr') or ''}".rstrip())
+            lines.append(f"{mark} {r['id']} {r.get('pr') or r.get('branch') or ''}".rstrip())
             if not r["passed"]:
                 lines += [f"   · {x}" for x in r["reasons"][:3]]
         if not todo:
             lines.append("Không có task nào sẵn sàng.")
         if stopped:
             lines.append(stopped)
+        lines.append("Chi tiết: python3 runner/kit.py report")
         summary = "\n".join(lines)
-        (run_dir / "SUMMARY.md").write_text(summary)
+        (run_dir / "SUMMARY.md").write_text(summary + "\n")
+        (run_dir / "meta.json").write_text(json.dumps(
+            {"host": HOST, "started": started, "finished": now(), "tasks": [r["id"] for r in results],
+             "stopped": stopped}, indent=2, ensure_ascii=False))
+        if not publish(st, run_dir, meta={"last_run": started}, msg="night summary") and LOG.enabled():
+            lines.append(f"(!) Không chia sẻ được kết quả lên nhánh {LOG_BRANCH}")
         print(summary)
         notify(summary)
     finally:
+        if remote_locked:
+            release_lock()
         lock.unlink(missing_ok=True)
 
 
 def main():
+    if hasattr(__import__("signal"), "SIGPIPE"):  # quiet exit when piped into head/less
+        import signal
+        signal.signal(signal.SIGPIPE, signal.SIG_DFL)
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("status").set_defaults(fn=cmd_status)
+    p = sub.add_parser("status"); p.add_argument("--offline", action="store_true"); p.set_defaults(fn=cmd_status)
+    p = sub.add_parser("report"); p.add_argument("--last", type=int, default=0)
+    p.add_argument("--task"); p.set_defaults(fn=cmd_report)
+    p = sub.add_parser("doctor"); p.add_argument("--fix", action="store_true"); p.set_defaults(fn=cmd_doctor)
     p = sub.add_parser("plan"); p.add_argument("design_dir"); p.set_defaults(fn=cmd_plan)
     p = sub.add_parser("approve"); p.add_argument("target"); p.set_defaults(fn=cmd_approve)
     p = sub.add_parser("night"); p.add_argument("--max", type=int, default=0); p.set_defaults(fn=cmd_night)
     sub.add_parser("sync").set_defaults(fn=cmd_sync)
     sub.add_parser("import").set_defaults(fn=cmd_import)
+    p = sub.add_parser("set"); p.add_argument("id"); p.add_argument("status"); p.set_defaults(fn=cmd_set)
     a = ap.parse_args()
     a.fn(a)
 

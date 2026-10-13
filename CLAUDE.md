@@ -12,7 +12,9 @@ Lưu ý: `template/CLAUDE.md`, `template/docs/` là **mẫu** cho project đích
 - `README.md` — hướng dẫn đầy đủ cho người dùng và agent. Sửa hành vi thì **phải** sửa README tương ứng.
 
 ## Bất biến — không được phá
-1. Trạng thái chạy không ghi vào `tasks/*.md` (tránh xung đột giữa MacBook và mini PC). Trạng thái ở `.agent-kit/state.json` + nhãn GitHub `status:*`.
+1. Trạng thái chạy không ghi vào `tasks/*.md` (tránh xung đột giữa MacBook và mini PC). Trạng thái dùng chung nằm trên nhánh orphan `agent-kit/log`; **mỗi máy chỉ ghi file của chính nó** (`state/<máy>.json`, `runs/<máy>/...`), đọc thì gộp theo `updated` (UTC) mới nhất. `lock.json` trên nhánh đó chống hai máy chạy `night` cùng lúc.
+1b. `status`, `report`, `doctor` (không `--fix`) **chỉ đọc**: chỉ `git fetch` ref nhánh log, không sửa file, không đổi nhánh, không push, không ghi `.agent-kit/state.json`.
+1c. `night` không chạy spec cũ: `git pull --ff-only` thất bại thì dừng.
 2. Test ẩn không bao giờ nằm trong repo đích hay trong tầm đọc của worker/implementer.
 3. Chỉ runner (script) được push, tạo PR/issue. Agent thì không.
 4. Hook dùng `onFailure: "block"`: hook lỗi thì chặn.

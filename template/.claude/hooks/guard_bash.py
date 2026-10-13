@@ -6,6 +6,7 @@ import re
 import sys
 from pathlib import Path
 
+sys.dont_write_bytecode = True  # no __pycache__ inside .claude/hooks
 sys.path.insert(0, str(Path(__file__).parent))
 from _common import PROTECTED, deny, log, read_input, unlocked  # noqa: E402
 

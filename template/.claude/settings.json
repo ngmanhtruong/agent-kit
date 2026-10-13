@@ -2,6 +2,9 @@
   "permissions": {
     "allow": [
       "Bash(bash eval/checks.sh)",
+      "Bash(python3 runner/kit.py status*)",
+      "Bash(python3 runner/kit.py report*)",
+      "Bash(python3 runner/kit.py doctor)",
       "Bash(git status *)",
       "Bash(git diff *)",
       "Bash(git log *)",

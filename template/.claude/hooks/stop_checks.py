@@ -8,6 +8,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+sys.dont_write_bytecode = True  # no __pycache__ inside .claude/hooks
 sys.path.insert(0, str(Path(__file__).parent))
 from _common import PROJECT, is_protected, log, read_input, role_of  # noqa: E402
 
