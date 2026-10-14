@@ -59,6 +59,7 @@ ROOT = Path(__file__).resolve().parent.parent
 TASKS = ROOT / "tasks"
 STATE_DIR = ROOT / ".agent-kit"
 STATE_FILE = STATE_DIR / "state.json"
+MANIFEST = ROOT / ".agent-kit-manifest.json"
 STATUSES = ["draft", "queued", "running", "review", "verify", "done", "failed"]
 LIMIT_RE = re.compile(r"usage limit|rate.?limit|limit reached|quota", re.I)
 
@@ -97,6 +98,29 @@ LOG_REF = f"refs/remotes/origin/{LOG_BRANCH}"
 
 def flag(name: str) -> bool:
     return CFG.get(name, "0") == "1"
+
+
+def kit_version() -> str:
+    try:
+        return (ROOT / "runner" / "VERSION").read_text().strip()
+    except OSError:
+        return "?"
+
+
+def kit_drift() -> tuple:
+    """(đã sửa, thiếu) so với .agent-kit-manifest.json — chỉ đọc. None nếu chưa có manifest."""
+    try:
+        files = json.loads(MANIFEST.read_text()).get("files", {})
+    except (OSError, ValueError):
+        return None
+    changed, missing = [], []
+    for rel, digest in sorted(files.items()):
+        p = ROOT / rel
+        if not p.exists():
+            missing.append(rel)
+        elif hashlib.sha256(p.read_bytes()).hexdigest() != digest:
+            changed.append(rel)
+    return changed, missing
 
 
 def now() -> str:
@@ -717,6 +741,16 @@ def cmd_doctor(args):
         say("✓", "runner/config.env có")
     else:
         say("✗", "thiếu runner/config.env → cp runner/config.env.example runner/config.env")
+    drift = kit_drift()
+    if drift is None:
+        say("!", f"agent-kit {kit_version()}, chưa có .agent-kit-manifest.json (cài từ bản cũ) → install.py <repo> --upgrade --force")
+    elif drift[0] or drift[1]:
+        guard = [r for r in drift[0] if r.startswith((".claude/hooks/", "runner/kit.py", ".claude/rules/"))]
+        say("!", f"agent-kit {kit_version()}: {len(drift[0])} file của kit bị sửa, {len(drift[1])} bị xoá so với lúc cài"
+            + (f" (đáng chú ý: {', '.join(guard[:4])})" if guard else "")
+            + " — cố ý thì bỏ qua; muốn lấy bản chuẩn: install.py <repo> --upgrade")
+    else:
+        say("✓", f"agent-kit {kit_version()}: file của kit khớp manifest")
     mode = agent_mode()
     if mode == "claude":
         ok, v = claude_version_ok()
@@ -2012,6 +2046,7 @@ def main():
         signal.signal(signal.SIGPIPE, signal.SIG_DFL)
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.set_defaults(fn=cmd_menu)
+    ap.add_argument("--version", action="version", version=f"agent-kit {kit_version()}")
     sub = ap.add_subparsers(dest="cmd")
     p = sub.add_parser("menu", help="menu chọn việc (chạy không tham số cũng ra menu)")
     p.add_argument("--json", action="store_true", help="in tình hình + lựa chọn dạng JSON (cho AI agent)"); p.set_defaults(fn=cmd_menu)

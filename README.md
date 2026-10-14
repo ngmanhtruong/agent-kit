@@ -225,6 +225,7 @@ your-project/
 │   └── skills/
 │       ├── finish-task/SKILL.md    Quy trình bắt buộc khi hoàn tất task
 │       └── promote-rule/SKILL.md   Biến lỗi lặp lại thành quy định tự động
+├── .agent-kit-manifest.json        Phiên bản kit + dấu vân tay các file của kit (commit; dùng cho `--upgrade` và `doctor`)
 └── .agent-kit/                     (gitignore) state, logs, báo cáo từng phiên
 ```
 
@@ -292,6 +293,7 @@ Installer **không ghi đè** file của bạn:
 - `.claude/settings.json` đã có → tự gộp permissions và hooks, giữ nguyên phần của bạn.
 - Thêm `.agent-kit/` và `runner/config.env` vào `.gitignore`.
 - Tạo `runner/config.env` từ file mẫu.
+- Ghi `.agent-kit-manifest.json` (phiên bản kit + dấu vân tay các file của kit). **Commit file này cùng khung.**
 
 ### 4.3 Commit khung
 
@@ -303,7 +305,28 @@ git add -A && git commit -m "add agent-kit" && git push
 
 Bắt buộc phải commit: runner tạo worktree từ nhánh gốc, nếu `.claude/` chưa commit thì worker sẽ chạy **không có rào chắn**. `kit.py work` tự kiểm tra và từ chối chạy trong trường hợp này.
 
-### 4.4 Thêm một máy khác
+### 4.4 Nâng cấp agent-kit
+
+Sửa lỗi hay tính năng mới của kit không tự đến project đã cài. Trong repo agent-kit: `git pull`, rồi:
+
+```bash
+python3 agent-kit/install.py ~/code/my-project --upgrade --dry-run   # xem sẽ đổi gì, chưa ghi gì
+python3 agent-kit/install.py ~/code/my-project --upgrade             # nâng cấp
+```
+
+Chỉ **file của kit** được nâng cấp: `runner/kit.py`, `.claude/hooks|agents|skills/`, `.claude/rules/agent-kit.md`, `.github/instructions/agent-kit.instructions.md`, `docs/orchestration.md`, các mẫu `_TEMPLATE`/`_IDEA`/`_PRD`. File của bạn (`CLAUDE.md`, `eval/checks.sh`, `docs/architecture.md`, `docs/conventions.md`, `runner/config.env`...) không bao giờ bị ghi đè; `.claude/settings.json` được gộp, không thay.
+
+| File của kit | Việc `--upgrade` làm |
+|---|---|
+| Chưa bị sửa (khớp manifest) | Thay bằng bản mới |
+| Bạn đã sửa | **Không ghi đè.** Bản mới đặt ở `.agent-kit/upgrade/<đường dẫn>`; so bằng `diff -u <file> .agent-kit/upgrade/<file>` rồi gộp tay |
+| Bạn đã sửa mà vẫn muốn lấy bản chuẩn | `--force`: ghi đè, bản cũ lưu ở `.agent-kit/backup/<giờ>/` |
+| Chưa có trong project (kit thêm mới) | Chép vào |
+| Kit không còn dùng | Chỉ báo, không xoá |
+
+Project cài từ bản cũ chưa có `.agent-kit-manifest.json`: mọi file khác bản mới bị coi là đã sửa, nên lần đầu dùng `--upgrade --force` (có sao lưu) nếu bạn chưa sửa file nào của kit. Sau khi nâng cấp: `python3 runner/kit.py doctor`, rồi commit `.agent-kit-manifest.json` và các file đã đổi. `kit.py --version` cho biết phiên bản; `doctor` cảnh báo khi file của kit (đặc biệt hooks, `kit.py`, quy tắc) bị sửa so với lúc cài. Lịch sử thay đổi: `CHANGELOG.md`.
+
+### 4.5 Thêm một máy khác
 
 Máy nào cũng cài giống nhau:
 

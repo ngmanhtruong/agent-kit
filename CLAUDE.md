@@ -10,6 +10,7 @@ Lưu ý: `template/.claude/rules/agent-kit.md`, `starter/CLAUDE.md`, `template/d
 - `starter/CLAUDE.md` — `CLAUDE.md` khởi đầu, chỉ chép vào project đích khi nó CHƯA có `CLAUDE.md`. Không bao giờ chạm `CLAUDE.md` của người dùng; quy tắc của kit nằm ở `template/.claude/rules/agent-kit.md`.
 - `install.py` — chép `template/` vào repo đích, gộp `settings.json`, không ghi đè file người dùng.
 - `template/` — nội dung được cài. Hooks, agents, skills, runner nằm ở đây.
+- `tests/smoke.py` — kiểm tra nhanh, không thuộc bản cài. `LICENSE` (MIT), `CHANGELOG.md`.
 - `README.md` — hướng dẫn đầy đủ cho người dùng và agent. Sửa hành vi thì **phải** sửa README tương ứng.
 
 ## Bất biến — không được phá
@@ -28,7 +29,7 @@ Lưu ý: `template/.claude/rules/agent-kit.md`, `starter/CLAUDE.md`, `template/d
 4. Hook dùng `onFailure: "block"`: hook lỗi thì chặn.
 5. `runner/kit.py`, hooks, `install.py` chỉ dùng thư viện chuẩn Python 3.8+. Script phải chạy trên cả macOS và Linux.
 6. Quyền ghi của agent con được ép trong `template/.claude/hooks/_common.py` (`ROLE_WRITE_ONLY`). Thêm agent mới thì thêm vùng ghi tương ứng.
-7. `install.py` không bao giờ ghi đè file đã có của người dùng.
+7. `install.py` không bao giờ ghi đè file của người dùng (`CLAUDE.md`, `eval/checks.sh`, `docs/architecture.md`, `config.env`...). Chỉ `--upgrade` mới đụng file của kit (danh sách `OWNED` trong `install.py`), và chỉ khi file chưa bị sửa so với `.agent-kit-manifest.json`; file đã sửa thì đặt bản mới ở `.agent-kit/upgrade/`, `--force` mới ghi đè và phải sao lưu. Thêm file vào `template/` thì quyết định nó thuộc kit (thêm vào `OWNED`) hay thuộc người dùng.
 
 ## Thêm một agent con mới
 1. Tạo `template/.claude/agents/<tên>.md` (frontmatter: name, description, tools).
@@ -39,8 +40,10 @@ Lưu ý: `template/.claude/rules/agent-kit.md`, `starter/CLAUDE.md`, `template/d
 ## Kiểm tra trước khi commit
 ```bash
 python3 -m py_compile install.py template/runner/kit.py template/.claude/hooks/*.py
+python3 tests/smoke.py        # cài / nâng cấp / hook / menu / doctor, không gọi AI
 ```
-Rồi chạy thử end-to-end: cài vào một repo git tạm, dùng một file `claude` giả (script in JSON) qua `CLAUDE_BIN` trong `runner/config.env`, chạy `kit.py approve` và `kit.py work` ở cả ba chế độ (`AGENT=claude` với claude giả, `AGENT=cli` với script giả đọc stdin, `AGENT=chat` bằng cách tự làm từng bước), kiểm tra cả nhánh PASS lẫn FAIL.
+Sửa `template/` hoặc `install.py` thì tăng `template/runner/VERSION` và thêm mục vào `CHANGELOG.md` (smoke test kiểm tra hai thứ này khớp nhau).
+`tests/smoke.py` không có kiểm tra `work` với agent giả. Bản đầy đủ từng có ở commit `6057217` (`git show 6057217:selftest.py`). Rồi chạy thử end-to-end: cài vào một repo git tạm, dùng một file `claude` giả (script in JSON) qua `CLAUDE_BIN` trong `runner/config.env`, chạy `kit.py approve` và `kit.py work` ở cả ba chế độ (`AGENT=claude` với claude giả, `AGENT=cli` với script giả đọc stdin, `AGENT=chat` bằng cách tự làm từng bước), kiểm tra cả nhánh PASS lẫn FAIL.
 
 Hook test nhanh:
 ```bash
