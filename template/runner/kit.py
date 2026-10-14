@@ -15,6 +15,7 @@ Kiểm tra (chỉ đọc — an toàn chạy trên bất kỳ máy nào, bất k
   python3 runner/kit.py status [--offline]       bảng trạng thái mọi task, gộp từ mọi máy
   python3 runner/kit.py report [--last N]        tóm tắt các phiên gần nhất (mọi máy)
   python3 runner/kit.py report --task <id>       chi tiết một task: lý do, log, báo cáo, nhánh
+  python3 runner/kit.py report --by-task [--last N]   mỗi task một dòng: lượt, PASS/FAIL, chi phí, thời gian; lý do FAIL hay gặp
   python3 runner/kit.py doctor                   kiểm tra toàn bộ: cài đặt, agent, tasks, đồng bộ
 
 Vòng đời: ý tưởng → PRD (REQ-xx) → design → epic/task → work (chấm từng task) → PR → merge
@@ -98,6 +99,15 @@ LOG_REF = f"refs/remotes/origin/{LOG_BRANCH}"
 
 def flag(name: str) -> bool:
     return CFG.get(name, "0") == "1"
+
+
+SPEND = {}  # task id -> {role: USD} của lượt đang chạy; finalize() đưa vào result.json
+
+
+def spend(tid: str, role: str, cost) -> None:
+    if cost:
+        SPEND.setdefault(tid, {})
+        SPEND[tid][role] = round(SPEND[tid].get(role, 0) + float(cost), 4)
 
 
 def kit_version() -> str:
@@ -616,8 +626,96 @@ def tail(text: str, n: int = 25) -> str:
     return "\n".join(("    " + l) for l in lines[-n:]) if lines else "    (trống)"
 
 
+def collect_results(last: int) -> list:
+    """result.json của mọi task trong `last` lượt chạy gần nhất (0 = tất cả), từ nhánh log + máy này. Chỉ đọc."""
+    runs = run_dirs()[: last or None]
+    keep = {(h, n) for n, h, _ in runs}
+    out = []
+
+    def add(text: str, n: str, h: str):
+        try:
+            d = json.loads(text)
+        except ValueError:
+            return
+        d["_run"], d["_host"] = n, h
+        out.append(d)
+
+    for p in log_ls("runs/"):
+        parts = p.split("/")  # runs/<máy>/<lượt>/<task>/result.json
+        if len(parts) == 5 and parts[4] == "result.json" and (parts[1], parts[2]) in keep:
+            add(log_read(p), parts[2], parts[1])
+    for n, h, s in runs:
+        if s == "local":
+            for f in sorted((STATE_DIR / "runs" / n).glob("*/result.json")):
+                add(f.read_text(), n, h)
+    return out
+
+
+def fmt_secs(x) -> str:
+    if not x:
+        return "-"
+    m = int(x) // 60
+    return f"{m // 60}h{m % 60:02d}" if m >= 60 else (f"{m}m" if m else f"{int(x)}s")
+
+
+def fail_key(reason: str) -> str:
+    return re.sub(r"\s+", " ", str(reason).strip().lstrip("-· ").split(":")[0])[:60]
+
+
+def report_by_task(last: int):
+    res = collect_results(last)
+    if not res:
+        print("Chưa có kết quả lượt chạy nào.")
+        return
+    tasks = load_tasks()
+    agg, reasons = {}, {}
+    for d in res:
+        a = agg.setdefault(str(d["id"]), dict(n=0, ok=0, cost=0.0, secs=0, timed=0, last=("", None), agent=set()))
+        a["n"] += 1
+        a["ok"] += bool(d.get("passed"))
+        a["cost"] += float(d.get("cost") or 0)
+        if d.get("seconds"):
+            a["secs"] += d["seconds"]
+            a["timed"] += 1
+        a["agent"].add(d.get("agent", "?"))
+        fin = str(d.get("finished", ""))
+        if fin >= a["last"][0]:
+            a["last"] = (fin, bool(d.get("passed")))
+        if not d.get("passed"):
+            for why in d.get("reasons", []) or ["(không rõ lý do)"]:
+                k = fail_key(why)
+                reasons[k] = reasons.get(k, 0) + 1
+    st, _, _ = view_state(fetch=False)
+    order = sorted(agg, key=lambda k: (-agg[k]["cost"], -agg[k]["n"], k))
+    rows = [("TASK", "TRẠNG THÁI", "LƯỢT", "PASS", "FAIL", "CHI PHÍ", "THỜI GIAN", "LƯỢT CUỐI")]
+    tot_cost = tot_secs = 0
+    for k in order:
+        a = agg[k]
+        tot_cost += a["cost"]
+        tot_secs += a["secs"]
+        t = tasks.get(k)
+        status = status_of(t, st) if t else st.get(k, {}).get("status", "-")
+        rows.append((k, status, a["n"], a["ok"], a["n"] - a["ok"],
+                     f"${a['cost']:.2f}" if a["cost"] else "-", fmt_secs(a["secs"]),
+                     "-" if a["last"][1] is None else ("PASS" if a["last"][1] else "FAIL")))
+    table(rows)
+    n_ok = sum(a["ok"] for a in agg.values())
+    n_all = sum(a["n"] for a in agg.values())
+    print(f"\n{len(agg)} task · {n_all} lượt chạy ({n_ok} PASS, {n_all - n_ok} FAIL, {100 * n_ok // max(n_all, 1)}% PASS)"
+          f" · tổng {'$%.2f' % tot_cost if tot_cost else 'chưa đo được chi phí'} · {fmt_secs(tot_secs)}")
+    if not tot_cost:
+        print("  (chi phí chỉ đo được với AGENT=claude; agent CLI/chat khác không báo chi phí)")
+    if reasons:
+        print("Lý do FAIL hay gặp: " + " · ".join(f"{k} ×{v}" for k, v in sorted(reasons.items(), key=lambda x: -x[1])[:3]))
+    multi = [k for k in order if agg[k]["n"] >= int(CFG["MAX_ATTEMPTS"]) and not agg[k]["ok"]]
+    if multi:
+        print("Thử hết lượt mà vẫn FAIL: " + ", ".join(multi) + "  → xem: python3 runner/kit.py report --task <id>")
+
+
 def cmd_report(args):
     fetch_log()
+    if getattr(args, "by_task", False):
+        return report_by_task(args.last)
     runs = run_dirs()
     if not runs:
         print("Chưa có lượt chạy nào.")
@@ -1060,6 +1158,7 @@ def write_holdout(t: dict) -> bool:
     tid = str(t["id"])
     shutil.rmtree(STATE_DIR / "holdout-staging" / tid, ignore_errors=True)
     r = call_agent(holdout_prompt(t), role="test-writer", cwd=ROOT, agent="test-writer", timeout_min=20)
+    spend(tid, "test-writer", r["cost"])
     if r["limit"]:
         raise LimitHit(r["result"][-300:])
     if not collect_holdout(tid):
@@ -1272,6 +1371,11 @@ def finalize(t: dict, st: dict, wd: Path, branch: str, attempt: int, base_sha: s
              g: dict, review: dict, out: Path, cost=0) -> dict:
     """Record the verdict, push the branch, open a PR on PASS — same for every agent."""
     tid, base = str(t["id"]), CFG["BASE_BRANCH"]
+    costs = SPEND.pop(tid, {})
+    if cost and not costs:
+        costs = {"worker": cost}
+    t0 = st.get(tid, {}).get("updated")  # lúc begin_attempt đặt 'running'
+    secs = age_hours(t0) * 3600 if t0 else float("inf")
     out.mkdir(parents=True, exist_ok=True)
     for f in ["checks.log", "holdout.log", f"reports/{tid}.md"]:
         p = wd / ".agent-kit" / f
@@ -1284,7 +1388,8 @@ def finalize(t: dict, st: dict, wd: Path, branch: str, attempt: int, base_sha: s
         git(["push", "-q", "-u", "origin", branch, "--force"], cwd=wd, check=False).returncode == 0
     result = {"id": tid, "passed": passed, "reasons": reasons, "branch": branch, "pushed": pushed,
               "base_sha": base_sha, "spec_sha": t["_sha"], "attempt": attempt, "host": HOST,
-              "agent": agent_mode(), "cost": cost, "risks": review.get("risks", []), "pr": "",
+              "agent": agent_mode(), "cost": round(sum(costs.values()), 4), "costs": costs,
+              "seconds": int(secs) if secs != float("inf") else None, "risks": review.get("risks", []), "pr": "",
               "finished": now()}
     if passed:
         pr = ""
@@ -1345,6 +1450,7 @@ def run_task(t, st, run_dir: Path) -> dict:
         w = call_agent(implementer_prompt(t, branch, prev), role="worker", cwd=wt, agent="implementer",
                        timeout_min=int(CFG["TASK_TIMEOUT_MIN"]))
         (out / "worker.txt").write_text(w["result"])
+        spend(tid, "worker", w["cost"])
         if w["limit"]:
             set_status(t, st, "queued", attempts=attempt - 1)
             raise LimitHit(w["result"][-300:])
@@ -1352,11 +1458,12 @@ def run_task(t, st, run_dir: Path) -> dict:
         review = {"verdict": "SKIPPED", "reasons": [], "risks": [], "human_should_check": []}
         if g["has_diff"]:  # independent review is core grading — always on
             rv = call_agent(reviewer_prompt(t, g), role="reviewer", cwd=wt, agent="reviewer", timeout_min=20)
+            spend(tid, "reviewer", rv["cost"])
             if rv["limit"]:
                 set_status(t, st, "queued", attempts=attempt - 1)
                 raise LimitHit(rv["result"][-300:])
             review = parse_review(rv["result"])
-        return finalize(t, st, wt, branch, attempt, base_sha, g, review, out, w["cost"])
+        return finalize(t, st, wt, branch, attempt, base_sha, g, review, out)
     finally:
         git(["worktree", "remove", "--force", str(wt)], check=False)
 
@@ -1830,7 +1937,7 @@ def menu_state() -> dict:
         ask="tuỳ chọn: `--task <ID>` để làm đúng một task; mặc định làm mọi task sẵn sàng")
     add("2", "Xem tình hình mọi task", "status")
     add("3", "Xem lại các phiên trước (làm được gì, vì sao fail)", "report",
-        ask="tuỳ chọn: `report --task <ID>` để xem chi tiết một task")
+        ask="tuỳ chọn: `report --task <ID>` chi tiết một task; `report --by-task` bảng lượt/PASS/FAIL/chi phí/thời gian theo task")
     add("4", "Kiểm tra hệ thống (doctor)", "doctor", why="chỉ chạy `doctor --fix` khi người dùng đồng ý")
     add("5", "Xem Issue GitHub tự động mở / nhập Issue thành task", "import", available=flag("GH_SYNC"),
         why="liệt kê trước: `gh issue list --label agent-ready --state open`; `import` chỉ tạo task nháp"
@@ -1871,8 +1978,10 @@ def menu_work():
 
 
 def menu_report():
-    tid = menu_ask("ID task muốn xem chi tiết, hoặc Enter để xem tóm tắt các phiên gần nhất: ")
-    menu_run("report" + (f" --task {tid}" if tid else ""), cmd_report, last=0, task=tid or None)
+    tid = menu_ask("ID task xem chi tiết · [c] bảng chi phí/lượt theo task · Enter: tóm tắt các phiên gần nhất: ")
+    if tid.lower() == "c":
+        return menu_run("report --by-task", cmd_report, last=0, task=None, by_task=True)
+    menu_run("report" + (f" --task {tid}" if tid else ""), cmd_report, last=0, task=tid or None, by_task=False)
 
 
 def menu_doctor():
@@ -2052,6 +2161,7 @@ def main():
     p.add_argument("--json", action="store_true", help="in tình hình + lựa chọn dạng JSON (cho AI agent)"); p.set_defaults(fn=cmd_menu)
     p = sub.add_parser("status"); p.add_argument("--offline", action="store_true"); p.set_defaults(fn=cmd_status)
     p = sub.add_parser("report"); p.add_argument("--last", type=int, default=0)
+    p.add_argument("--by-task", action="store_true", help="bảng theo task: lượt, PASS/FAIL, chi phí, thời gian, lý do FAIL")
     p.add_argument("--task"); p.set_defaults(fn=cmd_report)
     p = sub.add_parser("doctor"); p.add_argument("--fix", action="store_true"); p.set_defaults(fn=cmd_doctor)
     p = sub.add_parser("idea"); p.add_argument("design_dir"); p.set_defaults(fn=cmd_idea)

@@ -566,6 +566,7 @@ Chạy từ thư mục gốc project: `python3 runner/kit.py <lệnh>`
 |---|---|
 | `status [--offline]` | Bảng mọi task: trạng thái, số lần thử, phụ thuộc, máy chạy, giờ cập nhật, PR/nhánh. Cuối bảng: lượt chạy cuối của từng máy, máy nào đang chạy. `running?` = task kẹt. `--offline` không fetch |
 | `report [--last N]` | Tóm tắt N lượt chạy gần nhất của mọi máy (mặc định 3) |
+| `report --by-task [--last N]` | Mỗi task một dòng: trạng thái, số lượt, PASS/FAIL, chi phí, thời gian, kết quả lượt cuối; cuối bảng: tổng chi phí/thời gian, tỉ lệ PASS, lý do FAIL hay gặp, task đã hết lượt vẫn FAIL. Xếp task tốn nhất lên đầu. Chi phí chỉ đo được với `AGENT=claude` (gồm worker, reviewer, test-writer) |
 | `report --task <id> [--last N]` | Chi tiết một task qua các lượt: PASS/FAIL, lý do, nhánh, commit gốc, mã spec, reviewer, báo cáo worker, đuôi log checks/test ẩn/worker |
 | `doctor` | Kiểm tra toàn bộ. Trả mã thoát 1 nếu có lỗi (✗), dùng được trong script |
 | `trace [design/<feature>] [--offline]` | Yêu cầu → task → trạng thái: REQ nào chưa có task, bao nhiêu REQ đã xong, epic đang ở đâu |

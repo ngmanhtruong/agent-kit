@@ -181,6 +181,38 @@ class TestInstalledKit(Base):
         for o in m["options"]:
             self.assertTrue({"command", "available", "ai", "key", "label"} <= set(o))
 
+    def fake_run(self, name, tid, **kw):
+        d = self.d / ".agent-kit/runs" / name / tid
+        d.mkdir(parents=True)
+        res = dict(id=tid, passed=True, reasons=[], attempt=1, host="m", agent="claude", cost=0.0,
+                   seconds=60, finished=name)
+        res.update(kw)
+        (d / "result.json").write_text(json.dumps(res))
+
+    def test_report_by_task(self):
+        self.fake_run("2026-10-01_000001_m", "A-1", passed=False, cost=0.75,
+                      reasons=["- sửa vùng bảo vệ: eval/checks.sh"], costs={"worker": 0.5, "reviewer": 0.25})
+        self.fake_run("2026-10-02_000001_m", "A-1", cost=0.5, costs={"worker": 0.5})
+        self.fake_run("2026-10-02_000001_m", "B-1")
+        out = self.kit("report", "--by-task").stdout
+        self.assertIn("A-1", out)
+        self.assertLess(out.index("A-1"), out.index("B-1"), "task tốn nhất phải đứng đầu")
+        self.assertIn("$1.25", out)
+        self.assertIn("3 lượt chạy (2 PASS, 1 FAIL", out)
+        self.assertIn("sửa vùng bảo vệ ×1", out)
+
+    def test_report_by_task_empty(self):
+        self.assertIn("Chưa có", self.kit("report", "--by-task").stdout)
+
+    def test_spend_accumulates_per_role(self):
+        code = ("import sys; sys.path.insert(0,'runner'); import kit; "
+                "kit.spend('T','worker',0.5); kit.spend('T','reviewer',0.25); kit.spend('T','worker',0.25); kit.spend('T','x',0); "
+                "print(kit.SPEND)")
+        out = run([PY, "-c", code], self.d).stdout
+        self.assertIn("'worker': 0.75", out)
+        self.assertIn("'reviewer': 0.25", out)
+        self.assertNotIn("'x'", out)
+
     def test_hooks_deny(self):
         env = dict(os.environ, CLAUDE_PROJECT_DIR=str(self.d))
         r = run([PY, ".claude/hooks/guard_bash.py"], self.d, env, input='{"tool_input":{"command":"git push"}}')
