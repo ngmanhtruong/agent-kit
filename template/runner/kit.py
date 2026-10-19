@@ -74,7 +74,7 @@ def load_config() -> dict:
         "GH_SYNC": "0", "GIT_PULL": "1", "PUBLISH": "1",
         "LOG_BRANCH": "agent-kit/log", "MACHINE_NAME": "", "LOCK_HOURS": "12",
         "STALE_RUN_HOURS": "", "EPIC_TEST_CMD": "",
-        "TELEGRAM_BOT_TOKEN": "", "TELEGRAM_CHAT_ID": "",
+        "TELEGRAM_BOT_TOKEN": "", "TELEGRAM_CHAT_ID": "", "ANTHROPIC_BASE_URL": "",
         "WORKTREE_ROOT": str(ROOT.parent / f".agent-worktrees-{ROOT.name}"),
     }
     f = ROOT / "runner" / "config.env"
@@ -521,6 +521,8 @@ def _cli(prompt: str, role: str, cwd: Path, agent: str, timeout_min: int) -> dic
 def _exec(cmd, cwd, role, timeout_min, parse_json=False, stdin=None) -> dict:
     env = dict(os.environ, AGENT_KIT_ROLE=role, AGENT_KIT_BASE=CFG["BASE_BRANCH"],
                AGENT_KIT_HOLDOUT_DIR=CFG.get("HOLDOUT_DIR", ""))
+    if CFG.get("ANTHROPIC_BASE_URL"):
+        env["ANTHROPIC_BASE_URL"] = CFG["ANTHROPIC_BASE_URL"]
     try:
         r = subprocess.run(cmd, cwd=str(cwd), capture_output=True, text=True, env=env,
                            input=stdin, timeout=timeout_min * 60)
@@ -862,6 +864,8 @@ def cmd_doctor(args):
     if flag("GH_SYNC"):
         r = run(["gh", "auth", "status"], check=False) if shutil.which("gh") else None
         say("✓" if r and r.returncode == 0 else "✗", "gh đã đăng nhập" if r and r.returncode == 0 else "gh chưa cài/chưa đăng nhập (GH_SYNC=1)")
+    if CFG.get("ANTHROPIC_BASE_URL"):
+        say("✓", f"agent gọi API qua proxy ANTHROPIC_BASE_URL={CFG['ANTHROPIC_BASE_URL']} (chỉ áp dụng cho kit.py work/plan)")
     tracked = git(["ls-files", ".claude/settings.json", "eval/checks.sh", "runner/kit.py"], check=False).stdout.split()
     say("✓" if len(tracked) == 3 else "✗", "khung agent-kit đã commit" if len(tracked) == 3
         else "khung agent-kit chưa commit đủ (.claude/, eval/, runner/) → worker sẽ chạy không rào chắn")

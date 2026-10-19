@@ -664,6 +664,7 @@ Lưu ý bảo mật: log của worker được đẩy lên nhánh `agent-kit/log
 | `MACHINE_NAME` | hostname | Tên máy trong báo cáo. Mỗi máy phải khác nhau |
 | `LOCK_HOURS` | `12` | Khoá "đang chạy" của một lượt bị chết tự hết hạn sau số giờ này |
 | `STALE_RUN_HOURS` | trống (tắt) | Chỉ khi bạn đặt lịch tự động: `doctor` cảnh báo nếu một máy quá số giờ này chưa chạy phiên nào |
+| `ANTHROPIC_BASE_URL` | trống | (AGENT=claude) Địa chỉ proxy nén context (vd Headroom), truyền cho agent con. Trống = gọi thẳng |
 | `WORKTREE_ROOT` | `../.agent-worktrees-<project>` | Nơi tạo worktree tạm, ngoài repo |
 | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | trống | Gửi tóm tắt mỗi phiên qua Telegram |
 
@@ -674,6 +675,15 @@ Lưu ý bảo mật: log của worker được đẩy lên nhánh `agent-kit/log
 | `AGENT_KIT_UNLOCK=1` | Cho Claude sửa vùng bảo vệ (khi **bạn** muốn nhờ nó sửa `CLAUDE.md`, `tasks/`, hooks, ...) |
 | `AGENT_KIT_SKIP_STOP_CHECK=1` | Tắt hook chấm khi dừng (phiên hỏi đáp, thử nghiệm) |
 | `AGENT_KIT_MAX_FIX_ATTEMPTS` | Số lần hook Stop bắt worker sửa lại (mặc định 3) |
+
+### 8.3 Tiết kiệm token
+
+Có sẵn (không tốn thêm token): `.claude/settings.json` chặn agent đọc `node_modules`, `dist`, `build`, `.next`, `coverage`, `__pycache__`, `.venv`, `*.log`, `*.min.js`, `*.map`. Cần đọc thư mục nào trong đó thì xoá dòng `deny` tương ứng ở `settings.json` của project.
+
+Tuỳ chọn, kit không phụ thuộc và không cài giúp:
+- **Proxy nén context** (Headroom...): chạy proxy rồi đặt `ANTHROPIC_BASE_URL` trong `runner/config.env`.
+- **RTK** (lọc output lệnh build/test/log) và **code-review-graph** (đồ thị mã nguồn): cài theo hướng dẫn của chính công cụ, trên từng máy.
+- Giữ `CLAUDE.md` ngắn (dưới ~200 dòng), nêu rõ file/dòng cần sửa trong `Acceptance` của task.
 
 ### 8.2 Giới hạn gói Pro
 
