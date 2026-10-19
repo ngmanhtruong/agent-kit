@@ -4,6 +4,10 @@ Phiên bản nằm ở `template/runner/VERSION` (một nguồn duy nhất; `ins
 `kit.py --version` và `kit.py doctor` đọc lại). Theo [SemVer](https://semver.org): sửa lỗi → patch, thêm tính năng tương thích → minor,
 đổi cách dùng/định dạng file → major. **Sửa `template/` thì phải tăng VERSION và thêm một dòng ở đây**, nếu không `--upgrade` không có gì để báo.
 
+## 0.3.0 — 2026-10-19
+- `.claude/settings.json` mẫu chặn agent đọc thư mục/file rác (`node_modules`, `dist`, `build`, `*.log`, `*.map`...) để tiết kiệm token.
+- `ANTHROPIC_BASE_URL` (tuỳ chọn, mặc định trống) trong `config.env`: chạy agent con qua proxy nén context; `doctor` báo khi bật. README mục 8.2.
+
 ## 0.2.0 — 2026-10-14
 - `kit.py report --by-task [--last N]`: mỗi task một dòng (lượt, PASS/FAIL, chi phí, thời gian, kết quả lượt cuối), tổng cộng và lý do FAIL hay gặp. Chỉ đọc. Có trong menu mục 3.
 - `result.json` của mỗi lượt ghi thêm `costs` (theo vai: worker / reviewer / test-writer; trước đây chỉ tính worker) và `seconds`. Chi phí chỉ đo được với `AGENT=claude`.
