@@ -249,7 +249,7 @@ your-project/
 | `eval/checks.sh` | Người | Bài chấm chung. Worker phải pass mới được dừng; runner chạy lại để xác nhận. |
 | `runner/kit.py` | Không ai (trừ khi nâng cấp kit) | Điều phối toàn bộ luồng. |
 | `runner/config.env` | Người, từng máy | Số task mỗi phiên, đường dẫn `claude`, test ẩn, GitHub, Telegram. |
-| `.claude/settings.json` | Người | Danh sách lệnh được phép/cấm và đăng ký hooks. |
+| `.claude/settings.json` | Người | Danh sách lệnh được phép/cấm, chặn đọc file rác (`node_modules`, `dist`, `*.log`... — mục 8.2) và đăng ký hooks. |
 | `.claude/hooks/*.py` | Người | Rào cứng. Chạy tự động trước mỗi lệnh/ghi file và khi agent dừng. |
 | `docs/orchestration.md` | Người | Sổ tay của agent chủ: bảng agent con, chọn agent theo yêu cầu, quy tắc điều phối, mẫu prompt khi spawn. Được nạp sẵn qua `.claude/rules/agent-kit.md`. |
 | `.claude/agents/*.md` | Người | Mỗi file là hướng dẫn cho một công việc (context-writer, planner, bug-triager, test-writer, implementer, reviewer): nhiệm vụ, công cụ, đầu vào, đầu ra. |
@@ -572,7 +572,7 @@ Chạy từ thư mục gốc project: `python3 runner/kit.py <lệnh>`
 | `trace [design/<feature>] [--offline]` | Yêu cầu → task → trạng thái: REQ nào chưa có task, bao nhiêu REQ đã xong, epic đang ở đâu |
 
 `doctor` kiểm tra:
-- **Cài đặt:** `config.env`, phiên bản `claude`, `gh` đăng nhập, khung đã commit, `checks.sh` đã cấu hình, có remote.
+- **Cài đặt:** `config.env`, phiên bản `claude`, proxy `ANTHROPIC_BASE_URL` (nếu bật), `gh` đăng nhập, khung đã commit, `checks.sh` đã cấu hình, có remote.
 - **Đồng bộ:** đọc được nhánh log; máy này chậm/nhanh hơn `origin/<BASE_BRANCH>`; `tasks/` có thay đổi chưa commit; phiên cuối của từng máy (cảnh báo nếu đặt `STALE_RUN_HOURS` và đã quá — lịch tự động có còn chạy?); khoá đang giữ hay đã chết.
 - **Yêu cầu (nếu dùng PRD):** PRD chưa duyệt, REQ chưa có task, task trỏ tới REQ không tồn tại.
 - **Tasks:** frontmatter hỏng, id trùng, `depends_on` trỏ tới task không tồn tại, vòng phụ thuộc, task đã duyệt mà Acceptance trống hoặc chưa có issue, thiếu test ẩn.
@@ -676,7 +676,7 @@ Lưu ý bảo mật: log của worker được đẩy lên nhánh `agent-kit/log
 | `AGENT_KIT_SKIP_STOP_CHECK=1` | Tắt hook chấm khi dừng (phiên hỏi đáp, thử nghiệm) |
 | `AGENT_KIT_MAX_FIX_ATTEMPTS` | Số lần hook Stop bắt worker sửa lại (mặc định 3) |
 
-### 8.3 Tiết kiệm token
+### 8.2 Tiết kiệm token
 
 Có sẵn (không tốn thêm token): `.claude/settings.json` chặn agent đọc `node_modules`, `dist`, `build`, `.next`, `coverage`, `__pycache__`, `.venv`, `*.log`, `*.min.js`, `*.map`. Cần đọc thư mục nào trong đó thì xoá dòng `deny` tương ứng ở `settings.json` của project.
 
@@ -685,7 +685,7 @@ Tuỳ chọn, kit không phụ thuộc và không cài giúp:
 - **RTK** (lọc output lệnh build/test/log) và **code-review-graph** (đồ thị mã nguồn): cài theo hướng dẫn của chính công cụ, trên từng máy.
 - Giữ `CLAUDE.md` ngắn (dưới ~200 dòng), nêu rõ file/dòng cần sửa trong `Acceptance` của task.
 
-### 8.2 Giới hạn gói Pro
+### 8.3 Giới hạn gói Pro
 
 Mỗi task tốn khoảng 2–3 lượt gọi Claude (worker, reviewer, cộng test-writer ở lần chạy đầu nếu task có test ẩn). Gói Pro giới hạn theo cửa sổ thời gian nên runner chạy **tuần tự**, ít task, và **tự dừng** khi chạm giới hạn (task dở được trả về hàng đợi, không tính là một lần thử).
 
