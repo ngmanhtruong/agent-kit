@@ -232,13 +232,37 @@ def load_tasks(problems: list = None) -> dict:
     return out
 
 
-def acceptance_ok(t: dict) -> bool:
+def acceptance_items(t: dict) -> list:
     sec = re.search(r"# Acceptance.*?\n(.*?)(\n# |\Z)", t["_body"], re.S)
     if not sec:
-        return False
-    items = [l for l in sec.group(1).splitlines()
-             if re.match(r"\s*- \[.\]", l) and "<!--" not in l and "checks.sh" not in l]
-    return len(items) > 0
+        return []
+    return [l for l in sec.group(1).splitlines()
+            if re.match(r"\s*- \[.\]", l) and "<!--" not in l and "checks.sh" not in l]
+
+
+def acceptance_ok(t: dict) -> bool:
+    return len(acceptance_items(t)) > 0
+
+
+def jev_check_acceptance(t: dict) -> None:
+    """Tuỳ chọn (JEV_ENABLED=1): cảnh báo dòng Acceptance khó kiểm chứng bằng có/không. Chỉ cảnh báo, không chặn."""
+    try:
+        import jev
+    except ImportError:
+        return
+    if not jev.enabled():
+        return
+    items = [re.sub(r"^\s*- \[.\]\s*", "", l).strip() for l in acceptance_items(t)][:20]
+    qs = {f"c{i}": f'The acceptance criterion "{x}" can be checked with a clear yes/no result '
+                   f"(a command, a test, or an observable outcome)." for i, x in enumerate(items)}
+    p = jev.ask({"task": t["_body"][:3000]}, qs)
+    if p is None:
+        print(f"  ! Jev không trả lời ({jev.last_error}) — bỏ qua kiểm tra Acceptance của {t['id']}")
+        return
+    low = float(jev.setting("JEV_ACCEPT_MIN"))
+    for i, x in enumerate(items):
+        if p[f"c{i}"] < low:
+            print(f"  ! {t['id']}: Acceptance #{i + 1} có vẻ khó kiểm chứng có/không (Jev {p[f'c{i}']:.2f}): {x[:100]}")
 
 
 # ───────────────────────── product requirements (PRD) ─────────────────────────
@@ -497,30 +521,30 @@ def role_guide(role: str) -> str:
     return re.sub(r"^---\n.*?\n---\n", "", text, flags=re.S).strip()
 
 
-def _claude(prompt: str, role: str, cwd: Path, agent: str, timeout_min: int) -> dict:
+def _claude(prompt: str, role: str, cwd: Path, agent: str, timeout_min: int, extra=None) -> dict:
     cmd = [CFG["CLAUDE_BIN"], "-p", prompt, "--output-format", "json",
            "--permission-mode", "acceptEdits", "--permission-prompts", "none"]
     if agent:
         cmd += ["--agent", agent]
     if CFG.get("MAX_BUDGET_USD"):
         cmd += ["--max-budget-usd", CFG["MAX_BUDGET_USD"]]
-    return _exec(cmd, cwd, role, timeout_min, parse_json=True)
+    return _exec(cmd, cwd, role, timeout_min, parse_json=True, extra=extra)
 
 
-def _cli(prompt: str, role: str, cwd: Path, agent: str, timeout_min: int) -> dict:
+def _cli(prompt: str, role: str, cwd: Path, agent: str, timeout_min: int, extra=None) -> dict:
     tmpl = CFG.get("AGENT_CMD", "").strip()
     if not tmpl:
         raise SystemExit("AGENT=cli nhưng AGENT_CMD trống trong runner/config.env")
     full = (role_guide(agent) + "\n\n---\n\n" + prompt) if agent else prompt
     parts = shlex.split(tmpl)
     if any("{prompt}" in x for x in parts):
-        return _exec([x.replace("{prompt}", full) for x in parts], cwd, role, timeout_min)
-    return _exec(parts, cwd, role, timeout_min, stdin=full)
+        return _exec([x.replace("{prompt}", full) for x in parts], cwd, role, timeout_min, extra=extra)
+    return _exec(parts, cwd, role, timeout_min, stdin=full, extra=extra)
 
 
-def _exec(cmd, cwd, role, timeout_min, parse_json=False, stdin=None) -> dict:
+def _exec(cmd, cwd, role, timeout_min, parse_json=False, stdin=None, extra=None) -> dict:
     env = dict(os.environ, AGENT_KIT_ROLE=role, AGENT_KIT_BASE=CFG["BASE_BRANCH"],
-               AGENT_KIT_HOLDOUT_DIR=CFG.get("HOLDOUT_DIR", ""))
+               AGENT_KIT_HOLDOUT_DIR=CFG.get("HOLDOUT_DIR", ""), **(extra or {}))
     if CFG.get("ANTHROPIC_BASE_URL"):
         env["ANTHROPIC_BASE_URL"] = CFG["ANTHROPIC_BASE_URL"]
     try:
@@ -542,12 +566,19 @@ def _exec(cmd, cwd, role, timeout_min, parse_json=False, stdin=None) -> dict:
             "result": str(j.get("result", r.stdout.strip() or raw)), "cost": j.get("total_cost_usd", 0) or 0}
 
 
-def call_agent(prompt: str, role: str, cwd: Path, agent: str = "", timeout_min: int = 60) -> dict:
+def call_agent(prompt: str, role: str, cwd: Path, agent: str = "", timeout_min: int = 60,
+               task_file: str = "") -> dict:
     mode = agent_mode()
+    extra = {"AGENT_KIT_TASK_FILE": task_file} if task_file else {}
+    try:
+        import jev  # tuỳ chọn; rỗng nếu tắt
+        extra.update(jev.env_for_agent())
+    except ImportError:
+        pass
     if mode == "claude":
-        return _claude(prompt, role, cwd, agent, timeout_min)
+        return _claude(prompt, role, cwd, agent, timeout_min, extra)
     if mode == "cli":
-        return _cli(prompt, role, cwd, agent, timeout_min)
+        return _cli(prompt, role, cwd, agent, timeout_min, extra)
     raise NeedsChat()
 
 
@@ -851,6 +882,17 @@ def cmd_doctor(args):
             + " — cố ý thì bỏ qua; muốn lấy bản chuẩn: install.py <repo> --upgrade")
     else:
         say("✓", f"agent-kit {kit_version()}: file của kit khớp manifest")
+    try:
+        import jev
+        if jev.setting("JEV_ENABLED") == "1":
+            if not jev.api_key():
+                say("✗", "Jev bật (JEV_ENABLED=1) nhưng thiếu khoá: đặt TYPESAFE_API_KEY (biến môi trường hoặc runner/config.env)")
+            else:
+                ok, msg = jev.check_key()
+                say("✓" if ok else "!", f"Jev bật (model {jev.setting('JEV_MODEL')}, chặn ≥ {jev.setting('JEV_BLOCK_AT')}): {msg}"
+                    + ("" if ok else " — khi lỗi: " + ("cho qua, chỉ còn luật regex" if jev.setting("JEV_ON_ERROR") != "block" else "CHẶN mọi lệnh")))
+    except ImportError:
+        pass
     mode = agent_mode()
     if mode == "claude":
         ok, v = claude_version_ok()
@@ -1107,6 +1149,8 @@ def cmd_approve(args):
         if t["type"] != "epic" and not acceptance_ok(t):
             print(f"✗ {t['id']}: Acceptance trống hoặc còn placeholder → bỏ qua")
             continue
+        if t["type"] != "epic":
+            jev_check_acceptance(t)
         set_front(t["_path"], "status", "approved")
         t["status"] = "approved"
         if flag("GH_SYNC") and not t.get("issue"):
@@ -1452,6 +1496,7 @@ def run_task(t, st, run_dir: Path) -> dict:
     out.mkdir(parents=True, exist_ok=True)
     try:
         w = call_agent(implementer_prompt(t, branch, prev), role="worker", cwd=wt, agent="implementer",
+                       task_file=str(t["_path"]),
                        timeout_min=int(CFG["TASK_TIMEOUT_MIN"]))
         (out / "worker.txt").write_text(w["result"])
         spend(tid, "worker", w["cost"])

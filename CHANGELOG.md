@@ -4,6 +4,11 @@ Phiên bản nằm ở `template/runner/VERSION` (một nguồn duy nhất; `ins
 `kit.py --version` và `kit.py doctor` đọc lại). Theo [SemVer](https://semver.org): sửa lỗi → patch, thêm tính năng tương thích → minor,
 đổi cách dùng/định dạng file → major. **Sửa `template/` thì phải tăng VERSION và thêm một dòng ở đây**, nếu không `--upgrade` không có gì để báo.
 
+## 0.4.0 — 2026-10-20
+- Tuỳ chọn Jev (TypeSafe), mặc định tắt: `runner/jev.py` (HTTP bằng thư viện chuẩn). Hook `guard_bash` chặn thêm lệnh nguy hiểm / lạc đề theo xác suất; `approve` cảnh báo dòng Acceptance khó kiểm chứng. Chỉ cố vấn, lỗi thì cho qua.
+- `install.py --with-jev` (cài hoặc nâng cấp) đặt `JEV_ENABLED=1`; `doctor` báo trạng thái Jev. Runner đưa cấu hình Jev và `AGENT_KIT_TASK_FILE` vào môi trường agent để hook trong worktree dùng được.
+- Cấu hình mới: `JEV_*`, `TYPESAFE_API_KEY` (xem README mục 8.4). Lưu ý riêng tư: bật nghĩa là lệnh shell và nội dung task được gửi tới dịch vụ TypeSafe.
+
 ## 0.3.0 — 2026-10-19
 - `.claude/settings.json` mẫu chặn agent đọc thư mục/file rác (`node_modules`, `dist`, `build`, `*.log`, `*.map`...) để tiết kiệm token.
 - `ANTHROPIC_BASE_URL` (tuỳ chọn, mặc định trống) trong `config.env`: chạy agent con qua proxy nén context; `doctor` báo khi bật. README mục 8.2.

@@ -6,12 +6,14 @@
 Chạy trước khi commit thay đổi ở install.py, template/ hoặc kit.py. Không thuộc bản cài (không nằm trong template/).
 Không thay cho thử end-to-end với agent giả (work PASS/FAIL, 3 chế độ): xem CLAUDE.md, mục "Kiểm tra trước khi commit".
 """
+import http.server
 import json
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
@@ -223,6 +225,132 @@ class TestInstalledKit(Base):
         r = run([PY, ".claude/hooks/guard_files.py"], self.d, env,
                 input=json.dumps({"tool_input": {"file_path": str(self.d / ".claude/rules/agent-kit.md")}}))
         self.assertIn("deny", r.stdout)
+
+
+class FakeJev(http.server.BaseHTTPRequestHandler):
+    """Giả lập api.typesafe.ai: trả xác suất cố định theo tên câu hỏi."""
+    probs = {"dangerous": 0.0, "off_task": 0.0, "c": 1.0}
+    status = 200
+    hits = 0
+
+    def log_message(self, *a):
+        pass
+
+    def _send(self, code, obj):
+        body = json.dumps(obj).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self):
+        FakeJev.hits += 1
+        self._send(FakeJev.status, {"models": ["jev-latest"]})
+
+    def do_POST(self):
+        FakeJev.hits += 1
+        req = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        assert self.headers["Authorization"] == "Bearer test-key", self.headers["Authorization"]
+        assert req["model"] and all(q["type"] == "noul" for q in req["questions"].values())
+        answers = {k: {"type": "noul", "noul": FakeJev.probs.get(k, FakeJev.probs["c"] if k.startswith("c") else 0.0)}
+                   for k in req["questions"]}
+        self._send(FakeJev.status, {"model": "jev-1", "answers": answers, "usage": {"input_tokens": 1, "output_tokens": 1}})
+
+
+class TestJev(Base):
+    @classmethod
+    def setUpClass(cls):
+        cls.srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), FakeJev)
+        cls.url = f"http://127.0.0.1:{cls.srv.server_port}"
+        threading.Thread(target=cls.srv.serve_forever, daemon=True).start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.srv.shutdown()
+
+    def setUp(self):
+        super().setUp()
+        FakeJev.probs = {"dangerous": 0.0, "off_task": 0.0, "c": 1.0}
+        FakeJev.status, FakeJev.hits = 200, 0
+        self.d = new_repo(self.tmp, "p")
+        self.install(self.d)
+        cfg = self.d / "runner/config.env"
+        cfg.write_text(cfg.read_text().replace("GH_SYNC=1", "GH_SYNC=0"))
+
+    def env(self, **kw):
+        e = dict(os.environ, CLAUDE_PROJECT_DIR=str(self.d), JEV_ENABLED="1", TYPESAFE_API_KEY="test-key",
+                 JEV_BASE_URL=self.url, JEV_TIMEOUT_S="2")
+        e.update(kw)
+        return e
+
+    def hook(self, cmd="ls -la", **kw):
+        return run([PY, ".claude/hooks/guard_bash.py"], self.d, self.env(**kw),
+                   input=json.dumps({"tool_input": {"command": cmd}})).stdout
+
+    def test_client_returns_probabilities_and_none_on_error(self):
+        code = "import sys; sys.path.insert(0,'runner'); import jev; print(jev.ask('x', {'dangerous':'q'}), jev.last_error)"
+        FakeJev.probs["dangerous"] = 0.4
+        self.assertIn("{'dangerous': 0.4}", run([PY, "-c", code], self.d, self.env()).stdout)
+        FakeJev.status = 500
+        out = run([PY, "-c", code], self.d, self.env()).stdout
+        self.assertIn("None", out)
+        self.assertIn("HTTP 500", out)
+
+    def test_hook_blocks_dangerous_and_allows_safe(self):
+        FakeJev.probs["dangerous"] = 0.95
+        self.assertIn("deny", self.hook())
+        FakeJev.probs["dangerous"] = 0.1
+        self.assertEqual(self.hook().strip(), "")
+
+    def test_hook_blocks_off_task_only_with_a_task_file(self):
+        FakeJev.probs["off_task"] = 0.95
+        self.assertEqual(self.hook().strip(), "", "không có task thì không hỏi off_task")
+        task = self.d / "t.md"
+        task.write_text("# Mục tiêu\nlàm X\n")
+        self.assertIn("deny", self.hook(AGENT_KIT_TASK_FILE=str(task)))
+
+    def test_hook_falls_back_when_jev_is_down_unless_block(self):
+        FakeJev.status = 500
+        self.assertEqual(self.hook().strip(), "")
+        self.assertIn("deny", self.hook(JEV_ON_ERROR="block"))
+        self.assertIn("HTTP 500", (self.d / ".agent-kit/logs/guard.log").read_text())
+
+    def test_disabled_makes_no_network_call_and_regex_still_blocks(self):
+        self.assertEqual(self.hook(JEV_ENABLED="0").strip(), "")
+        self.assertEqual(FakeJev.hits, 0)
+        FakeJev.probs["dangerous"] = 0.0
+        self.assertIn("deny", self.hook("git push", JEV_ENABLED="0"))
+
+    def test_no_key_means_disabled(self):
+        self.assertEqual(self.hook(TYPESAFE_API_KEY="").strip(), "")
+        self.assertEqual(FakeJev.hits, 0)
+
+    def test_with_jev_flag_sets_config_and_is_idempotent(self):
+        r = self.install(self.d, KIT, "--with-jev")
+        self.assertIn("TYPESAFE_API_KEY", r.stdout)
+        self.install(self.d, KIT, "--with-jev")
+        text = (self.d / "runner/config.env").read_text()
+        self.assertEqual(text.count("JEV_ENABLED=1"), 1)
+        self.assertNotIn("JEV_ENABLED=0", text)
+
+    def test_doctor_reports_jev(self):
+        out = run([PY, "runner/kit.py", "doctor"], self.d, self.env()).stdout
+        self.assertIn("Jev bật", out)
+        self.assertGreater(FakeJev.hits, 0)
+        out = run([PY, "runner/kit.py", "doctor"], self.d, self.env(TYPESAFE_API_KEY="")).stdout
+        self.assertIn("thiếu khoá", out)
+
+    def test_approve_warns_about_unverifiable_acceptance(self):
+        (self.d / "tasks/x").mkdir(parents=True, exist_ok=True)
+        (self.d / "tasks/x/T-1.md").write_text(
+            "---\nid: T-1\ntype: task\nepic: X\nstatus: draft\nholdout: false\ndesign: design/x\n---\n"
+            "# Mục tiêu\nlàm X\n# Acceptance\n- [ ] trả về 200 khi gọi /ping\n- [ ] code đẹp\n")
+        FakeJev.probs["c"] = 0.2
+        r = run([PY, "runner/kit.py", "approve", "T-1"], self.d, self.env())
+        self.assertIn("khó kiểm chứng", r.stdout)
+        self.assertIn("T-1 approved", r.stdout, "chỉ cảnh báo, không chặn")
+        self.assertIn("status: approved", (self.d / "tasks/x/T-1.md").read_text())
 
 
 class TestSources(unittest.TestCase):

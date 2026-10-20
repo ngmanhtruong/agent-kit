@@ -5,6 +5,7 @@
     python3 install.py /đường/dẫn/tới/repo --upgrade          nâng cấp các file của kit lên bản mới
     python3 install.py /đường/dẫn/tới/repo --upgrade --dry-run   chỉ in kế hoạch, không ghi gì
     python3 install.py /đường/dẫn/tới/repo --upgrade --force  ghi đè cả file của kit đã bị sửa (có sao lưu)
+    python3 install.py /đường/dẫn/tới/repo --with-jev         (cài hoặc nâng cấp) chọn dùng Jev/TypeSafe: bật JEV_ENABLED=1
 
 Cài lần đầu:
 - File chưa có → chép vào. File đã có → giữ nguyên.
@@ -37,7 +38,7 @@ SETTINGS = ".claude/settings.json"
 
 # File của kit: nâng cấp được. Mọi file khác trong template/ là của người dùng (chỉ chép khi chưa có).
 OWNED = (
-    "runner/kit.py", "runner/VERSION", "runner/config.env.example",
+    "runner/kit.py", "runner/jev.py", "runner/VERSION", "runner/config.env.example",
     ".claude/hooks/", ".claude/agents/", ".claude/skills/", ".claude/rules/agent-kit.md",
     ".github/instructions/agent-kit.instructions.md",
     "docs/orchestration.md", "tasks/_TEMPLATE.md",
@@ -112,6 +113,27 @@ def ensure_config_and_gitignore(repo: Path) -> None:
     add = [x for x in (".agent-kit/", "runner/config.env", "__pycache__/") if x not in lines]
     if add:
         gi.write_text("\n".join(lines + ["", "# agent-kit"] + add) + "\n")
+
+
+def enable_jev(repo: Path) -> None:
+    """Người dùng chọn dùng Jev: đặt JEV_ENABLED=1 trong runner/config.env (của máy này) và in các bước còn lại.
+    Không tự cài skill hay đặt khoá: skill nằm ở cấu hình agent của bạn, khoá là bí mật của bạn."""
+    cfg = repo / "runner" / "config.env"
+    lines = cfg.read_text().splitlines() if cfg.exists() else []
+    if any(l.strip().startswith("JEV_ENABLED=") for l in lines):
+        lines = ["JEV_ENABLED=1" if l.strip().startswith("JEV_ENABLED=") else l for l in lines]
+    else:
+        lines += ["", "# Jev (TypeSafe) — bật bởi install.py --with-jev", "JEV_ENABLED=1"]
+    cfg.write_text("\n".join(lines) + "\n")
+    print("\n✓ Jev: đã đặt JEV_ENABLED=1 trong runner/config.env (chỉ máy này; máy khác tự chạy lại với --with-jev).")
+    print("  Còn lại, tự làm:")
+    print("  1. Tạo khoá ở https://console.typesafe.ai/keys, rồi export TYPESAFE_API_KEY trong shell (hoặc điền vào runner/config.env).")
+    print("  2. (Tuỳ chọn) cài skill TypeSafe cho agent, giúp agent viết đúng code dùng API TypeSafe:")
+    print("       Claude Code:  claude plugin marketplace add typesafe-ai/skills && claude plugin install typesafe@typesafe-ai")
+    print("       Agent khác:   npx skills add typesafe-ai/skills --skill typesafe-ai")
+    print("     (kit.py tự gọi API nên không cần skill để Jev chạy.)")
+    print("  3. python3 runner/kit.py doctor   # kiểm tra kết nối Jev")
+    print("  Lưu ý riêng tư: lệnh shell của agent và nội dung task/Acceptance sẽ được gửi tới api.typesafe.ai.")
 
 
 def install(repo: Path, dry: bool) -> None:
@@ -240,11 +262,12 @@ def report(repo: Path, notes: list, head: str) -> None:
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Cài / nâng cấp agent-kit", usage="install.py REPO [--upgrade [--force] [--dry-run]]")
+    ap = argparse.ArgumentParser(description="Cài / nâng cấp agent-kit", usage="install.py REPO [--upgrade [--force] [--dry-run]] [--with-jev]")
     ap.add_argument("repo")
     ap.add_argument("--upgrade", action="store_true", help="nâng cấp các file của kit")
     ap.add_argument("--force", action="store_true", help="(với --upgrade) ghi đè cả file của kit đã bị sửa, có sao lưu")
     ap.add_argument("--dry-run", action="store_true", help="chỉ in kế hoạch")
+    ap.add_argument("--with-jev", action="store_true", help="chọn dùng Jev (TypeSafe): đặt JEV_ENABLED=1 trong runner/config.env")
     a = ap.parse_args()
     if (a.force or a.dry_run) and not a.upgrade:
         ap.error("--force và --dry-run chỉ dùng cùng --upgrade")
@@ -257,6 +280,8 @@ def main() -> None:
         upgrade(repo, a.force, a.dry_run)
     else:
         install(repo, False)
+    if a.with_jev and not a.dry_run:
+        enable_jev(repo)
 
 
 if __name__ == "__main__":

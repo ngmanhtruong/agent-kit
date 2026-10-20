@@ -200,6 +200,7 @@ your-project/
 │   └── checks.sh                 ★ Thang điểm: 1 lệnh, exit 0 = đạt (bạn điền)
 ├── runner/
 │   ├── kit.py                      Bộ điều phối (plan / approve / run / status / ...)
+│   ├── jev.py                      (Tuỳ chọn) client Jev/TypeSafe: phán đoán có/không qua HTTP, mặc định tắt
 │   ├── config.env.example          Mẫu cấu hình
 │   └── config.env                ★ Cấu hình riêng từng máy (bạn điền, KHÔNG commit)
 ├── .github/
@@ -285,6 +286,7 @@ your-project/
 ```bash
 git clone git@github.com:ngmanhtruong/agent-kit.git
 python3 agent-kit/install.py ~/code/my-project
+# muốn dùng Jev (TypeSafe)? thêm --with-jev, xem mục 8.4
 ```
 
 Installer **không ghi đè** file của bạn:
@@ -688,6 +690,46 @@ Tuỳ chọn, kit không phụ thuộc và không cài giúp:
 ### 8.3 Giới hạn gói Pro
 
 Mỗi task tốn khoảng 2–3 lượt gọi Claude (worker, reviewer, cộng test-writer ở lần chạy đầu nếu task có test ẩn). Gói Pro giới hạn theo cửa sổ thời gian nên runner chạy **tuần tự**, ít task, và **tự dừng** khi chạm giới hạn (task dở được trả về hàng đợi, không tính là một lần thử).
+
+### 8.4 Jev (TypeSafe) — tuỳ chọn, mặc định tắt
+
+[Jev](https://docs.typesafe.ai/) là mô hình phán đoán nhanh của TypeSafe: nhận văn bản + câu hỏi có/không, trả **xác suất** (không sinh văn bản). agent-kit dùng nó ở hai chỗ, **chỉ để cố vấn**, không thay khâu bắt buộc nào (reviewer độc lập, `grade()`, test ẩn vẫn chạy như cũ):
+
+| Chỗ dùng | Việc Jev làm | Khi Jev lỗi hoặc chậm |
+|---|---|---|
+| Hook `guard_bash` (Claude Code) | Sau các luật regex, hỏi 2 câu: lệnh này có nguy hiểm (phá dữ liệu, lộ bí mật, ra ngoài project) không? có lạc đề so với task đang làm không (chỉ khi runner giao task)? Xác suất ≥ `JEV_BLOCK_AT` thì chặn lệnh, ghi vào `.agent-kit/logs/guard.log` | `JEV_ON_ERROR=allow` (mặc định): cho qua, chỉ còn luật regex. `block`: chặn lệnh |
+| `kit.py approve` | Hỏi từng dòng Acceptance: kiểm chứng được bằng kết quả có/không không? Xác suất < `JEV_ACCEPT_MIN` thì **cảnh báo** (không chặn duyệt) | In cảnh báo không kiểm tra được, vẫn duyệt |
+
+**Bật:**
+
+```bash
+python3 agent-kit/install.py ~/code/my-project --with-jev   # cài hoặc nâng cấp, đặt JEV_ENABLED=1 trong runner/config.env
+export TYPESAFE_API_KEY=...                                   # khoá tạo ở https://console.typesafe.ai/keys (hoặc điền vào runner/config.env)
+python3 runner/kit.py doctor                                  # kiểm tra kết nối
+```
+
+Cài `--with-jev` chỉ đổi `config.env` của **máy này**; máy khác tự chạy lại hoặc sửa `config.env`. Muốn tắt: `JEV_ENABLED=0`. Không có khoá thì Jev coi như tắt (và `doctor` báo ✗ nếu `JEV_ENABLED=1`).
+
+**Skill TypeSafe cho agent (tuỳ chọn, không cần để Jev chạy):** skill giúp agent viết đúng code khi *sản phẩm của bạn* dùng API TypeSafe. `kit.py` tự gọi API bằng thư viện chuẩn nên không phụ thuộc skill. Cài theo [tài liệu TypeSafe](https://docs.typesafe.ai/agent-skill): `claude plugin marketplace add typesafe-ai/skills && claude plugin install typesafe@typesafe-ai` (Claude Code) hoặc `npx skills add typesafe-ai/skills --skill typesafe-ai` (agent khác).
+
+| Biến (`runner/config.env`) | Mặc định | Tác dụng |
+|---|---|---|
+| `JEV_ENABLED` | `0` | `1` = bật |
+| `TYPESAFE_API_KEY` | | Khoá API (hoặc biến môi trường cùng tên; có thể dùng `JEV_API_KEY`) |
+| `JEV_GUARD` | `1` | (khi bật) hook hỏi Jev về mỗi lệnh shell. Thêm vài trăm ms mỗi lệnh |
+| `JEV_MODEL` | `jev-latest` | Tên model (`GET /v1/models` liệt kê) |
+| `JEV_BLOCK_AT` | `0.85` | Ngưỡng chặn lệnh |
+| `JEV_ACCEPT_MIN` | `0.5` | Ngưỡng cảnh báo Acceptance |
+| `JEV_TIMEOUT_S` | `5` | Thời gian chờ tối đa mỗi lần gọi |
+| `JEV_ON_ERROR` | `allow` | `allow` / `block` khi Jev lỗi |
+| `JEV_BASE_URL` | `https://api.typesafe.ai` | Địa chỉ API |
+
+**Cần biết trước khi bật:**
+- **Riêng tư:** lệnh shell của agent (tối đa 1500 ký tự mỗi lệnh) và nội dung task/Acceptance được gửi tới dịch vụ TypeSafe. Với mã nguồn hay dữ liệu nhạy cảm của công ty, hãy xin phép trước.
+- **Khoá nằm trong môi trường của agent:** runner đưa khoá vào môi trường tiến trình agent để hook (kể cả hook chạy trong worktree, nơi không có `config.env`) dùng được. Agent có thể đọc nó bằng `echo $TYPESAFE_API_KEY`. Hãy dùng khoá riêng cho agent-kit, giới hạn quyền và hạn mức.
+- **Ngưỡng cần đo:** `0.85`/`0.5` là điểm khởi đầu. Xem `.agent-kit/logs/guard.log` (dòng `BLOCK_BASH_JEV`, `JEV_ERROR`) rồi chỉnh theo dữ liệu của bạn.
+- **Chỉ có hook với Claude Code.** Chế độ `cli`/`chat` không có hook, nên chỉ có cảnh báo ở `approve`.
+- Hook của người dùng tương tác (không qua `work`) vẫn hỏi Jev câu "nguy hiểm", nhưng không có câu "lạc đề" vì không có task.
 
 ---
 

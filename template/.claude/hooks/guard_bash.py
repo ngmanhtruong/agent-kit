@@ -8,7 +8,7 @@ from pathlib import Path
 
 sys.dont_write_bytecode = True  # no __pycache__ inside .claude/hooks
 sys.path.insert(0, str(Path(__file__).parent))
-from _common import PROTECTED, deny, log, read_input, unlocked  # noqa: E402
+from _common import PROJECT, PROTECTED, deny, log, read_input, unlocked  # noqa: E402
 
 data = read_input()
 cmd = (data.get("tool_input", {}) or {}).get("command", "")
@@ -51,5 +51,39 @@ if not unlocked():
         if re.search(write_ops + r"[^;&|]*(^|[\s/'\"])" + target + r"(/|\b)", cmd):
             log("BLOCK_BASH_PROTECTED", cmd[:200])
             deny(f"Không được ghi/xoá vùng bảo vệ '{item}' bằng shell.")
+
+# Optional semantic check (Jev, TypeSafe). Off unless JEV_ENABLED=1 and a key is set. The regex rules above
+# stay the hard barrier: if Jev is slow/unreachable we fall back to them (JEV_ON_ERROR=allow, the default).
+if not unlocked():
+    try:
+        sys.path.insert(0, str(PROJECT / "runner"))
+        import jev  # noqa: E402
+        if jev.enabled() and jev.setting("JEV_GUARD") == "1":
+            task = ""
+            tf = os.environ.get("AGENT_KIT_TASK_FILE", "")
+            if tf and Path(tf).is_file():
+                task = Path(tf).read_text()[:2000]
+            questions = {"dangerous": "Running this command would destroy data, leak secrets or credentials, "
+                                      "change system or security settings, or act outside the project, "
+                                      "beyond what ordinary software development needs."}
+            if task:
+                questions["off_task"] = "This command has nothing to do with accomplishing the task in `task`."
+            p = jev.ask({"command": cmd[:1500], "task": task or "(interactive session, no task file)"}, questions)
+            limit = float(jev.setting("JEV_BLOCK_AT"))
+            if p is None:
+                log("JEV_ERROR", f"{jev.last_error}\t{cmd[:120]}")
+                if jev.setting("JEV_ON_ERROR") == "block":
+                    deny(f"Jev không trả lời được ({jev.last_error}) và JEV_ON_ERROR=block.")
+            else:
+                hit = [k for k, v in p.items() if v >= limit]
+                if hit:
+                    log("BLOCK_BASH_JEV", f"{hit}\t{p}\t{cmd[:200]}")
+                    why = "nguy hiểm" if "dangerous" in hit else "không liên quan task"
+                    deny(f"Jev đánh giá lệnh này {why} (xác suất {max(p.values()):.2f} ≥ {limit}). "
+                         "Nếu đúng ý bạn, hãy chạy lệnh đó bằng tay.")
+    except SystemExit:
+        raise
+    except Exception as e:  # Jev không bao giờ làm hỏng hook
+        log("JEV_ERROR", f"{type(e).__name__}: {e}"[:200])
 
 sys.exit(0)
