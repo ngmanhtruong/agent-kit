@@ -334,6 +334,53 @@ class TestJev(Base):
         self.assertEqual(text.count("JEV_ENABLED=1"), 1)
         self.assertNotIn("JEV_ENABLED=0", text)
 
+    def kit(self, *args, **env):
+        return run([PY, "runner/kit.py", *args], self.d, self.env(**env))
+
+    def test_kit_jev_status_is_read_only(self):
+        cfg = self.d / "runner/config.env"
+        before = cfg.read_text()
+        out = self.kit("jev", JEV_ENABLED="0").stdout
+        self.assertIn("TẮT", out)
+        self.assertIn("đã nối Jev", out)
+        self.assertEqual(before, cfg.read_text())
+
+    def test_kit_jev_on_needs_confirmation_without_tty_then_off(self):
+        cfg = self.d / "runner/config.env"
+        r = self.kit("jev", "on")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("--yes", r.stdout + r.stderr)
+        self.assertIn("JEV_ENABLED=0", cfg.read_text(), "chưa xác nhận thì không đổi gì")
+        r = self.kit("jev", "on", "--yes")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(cfg.read_text().count("JEV_ENABLED=1"), 1)
+        self.assertIn("BẬT", r.stdout)
+        self.kit("jev", "off")
+        text = cfg.read_text()
+        self.assertEqual(text.count("JEV_ENABLED="), 1)
+        self.assertIn("JEV_ENABLED=0", text)
+
+    def test_kit_jev_on_warns_when_key_missing(self):
+        r = self.kit("jev", "on", "--yes", TYPESAFE_API_KEY="", JEV_API_KEY="")
+        self.assertIn("thiếu khoá", r.stdout)
+
+    def test_doctor_hints_how_to_enable_when_off(self):
+        out = self.kit("doctor", JEV_ENABLED="0").stdout
+        self.assertIn("kit.py jev on", out)
+
+    def test_menu_lists_jev_option(self):
+        m = json.loads(self.kit("menu", "--json").stdout)
+        self.assertIn("j", [o["key"] for o in m["options"] if o["available"]])
+
+    def test_with_jev_warns_when_project_is_not_wired(self):
+        (self.d / ".claude/hooks/guard_bash.py").write_text("# old hook without the Jev bridge\n")
+        r = self.install(self.d, KIT, "--with-jev")
+        self.assertIn("CHƯA có tác dụng", r.stdout)
+        self.assertIn("--upgrade --with-jev", r.stdout)
+        ok = new_repo(self.tmp, "ok")
+        self.install(ok)
+        self.assertNotIn("CHƯA có tác dụng", self.install(ok, KIT, "--with-jev").stdout)
+
     def test_doctor_reports_jev(self):
         out = run([PY, "runner/kit.py", "doctor"], self.d, self.env()).stdout
         self.assertIn("Jev bật", out)

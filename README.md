@@ -594,6 +594,7 @@ Chạy từ thư mục gốc project: `python3 runner/kit.py <lệnh>`
 | `sync` | Gộp trạng thái mọi máy; nhãn GitHub sửa tay; PR merged → `done`, đóng → `failed`; epic có đủ task `done` → `verify`; chia sẻ kết quả | Không |
 | `set <id> <status>` | Đổi trạng thái tay, ví dụ `failed` → `queued` để chạy lại (đặt lại số lần thử) | Không |
 | `doctor --fix` | Đưa task kẹt `running` về `queued`, rồi `sync` | Không |
+| `jev [on\|off\|status]` | Bật/tắt/xem Jev (TypeSafe, tuỳ chọn, mục 8.4). Chỉ sửa `runner/config.env` của máy này. `on` hỏi xác nhận vì dữ liệu gửi ra ngoài | Không (Jev là dịch vụ riêng, không phải agent) |
 | `import` | Issue nhãn `agent-ready` → task nháp trong `tasks/imported/` | Không |
 
 ### 7.1 Định dạng file task
@@ -700,15 +701,19 @@ Mỗi task tốn khoảng 2–3 lượt gọi Claude (worker, reviewer, cộng t
 | Hook `guard_bash` (Claude Code) | Sau các luật regex, hỏi 2 câu: lệnh này có nguy hiểm (phá dữ liệu, lộ bí mật, ra ngoài project) không? có lạc đề so với task đang làm không (chỉ khi runner giao task)? Xác suất ≥ `JEV_BLOCK_AT` thì chặn lệnh, ghi vào `.agent-kit/logs/guard.log` | `JEV_ON_ERROR=allow` (mặc định): cho qua, chỉ còn luật regex. `block`: chặn lệnh |
 | `kit.py approve` | Hỏi từng dòng Acceptance: kiểm chứng được bằng kết quả có/không không? Xác suất < `JEV_ACCEPT_MIN` thì **cảnh báo** (không chặn duyệt) | In cảnh báo không kiểm tra được, vẫn duyệt |
 
-**Bật:**
+**Bật** (cách nào cũng được, bật lúc nào cũng được, không cần cài lại):
 
 ```bash
-python3 agent-kit/install.py ~/code/my-project --with-jev   # cài hoặc nâng cấp, đặt JEV_ENABLED=1 trong runner/config.env
+python3 runner/kit.py jev on                                  # ngay trong project: hỏi xác nhận, đặt JEV_ENABLED=1 (--yes nếu không có terminal)
+python3 runner/kit.py jev                                     # xem trạng thái: bật/tắt, có khoá chưa, hook đã nối chưa, kết nối
+python3 runner/kit.py jev off                                 # tắt
+# hoặc từ mã nguồn agent-kit:
+python3 agent-kit/install.py ~/code/my-project --upgrade --with-jev   # nâng cấp lên bản có Jev và đặt JEV_ENABLED=1 trong runner/config.env
 export TYPESAFE_API_KEY=...                                   # khoá tạo ở https://console.typesafe.ai/keys (hoặc điền vào runner/config.env)
 python3 runner/kit.py doctor                                  # kiểm tra kết nối
 ```
 
-Cài `--with-jev` chỉ đổi `config.env` của **máy này**; máy khác tự chạy lại hoặc sửa `config.env`. Muốn tắt: `JEV_ENABLED=0`. Không có khoá thì Jev coi như tắt (và `doctor` báo ✗ nếu `JEV_ENABLED=1`).
+`jev on` và cài `--with-jev` chỉ đổi `config.env` của **máy này**; máy khác tự chạy lại hoặc sửa `config.env`. Muốn tắt: `JEV_ENABLED=0`. Không có khoá thì Jev coi như tắt (và `doctor` báo ✗ nếu `JEV_ENABLED=1`).
 
 **Skill TypeSafe cho agent (tuỳ chọn, không cần để Jev chạy):** skill giúp agent viết đúng code khi *sản phẩm của bạn* dùng API TypeSafe. `kit.py` tự gọi API bằng thư viện chuẩn nên không phụ thuộc skill. Cài theo [tài liệu TypeSafe](https://docs.typesafe.ai/agent-skill): `claude plugin marketplace add typesafe-ai/skills && claude plugin install typesafe@typesafe-ai` (Claude Code) hoặc `npx skills add typesafe-ai/skills --skill typesafe-ai` (agent khác).
 

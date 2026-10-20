@@ -4,6 +4,10 @@ Phiên bản nằm ở `template/runner/VERSION` (một nguồn duy nhất; `ins
 `kit.py --version` và `kit.py doctor` đọc lại). Theo [SemVer](https://semver.org): sửa lỗi → patch, thêm tính năng tương thích → minor,
 đổi cách dùng/định dạng file → major. **Sửa `template/` thì phải tăng VERSION và thêm một dòng ở đây**, nếu không `--upgrade` không có gì để báo.
 
+## 0.5.0 — 2026-10-20
+- `kit.py jev [on|off|status]`: bật/tắt/xem Jev ngay trong project (sửa `runner/config.env` của máy này; không cần mã nguồn agent-kit). `on` hỏi xác nhận (cần `--yes` khi không có terminal) vì dữ liệu được gửi ra ngoài. Có trong menu (phím `j`) và `menu --json`.
+- `doctor` luôn nhắc cách bật khi Jev tắt. `install.py --with-jev` cảnh báo khi project chưa có phần nối Jev (cài từ bản cũ): cần `--upgrade`.
+
 ## 0.4.0 — 2026-10-20
 - Tuỳ chọn Jev (TypeSafe), mặc định tắt: `runner/jev.py` (HTTP bằng thư viện chuẩn). Hook `guard_bash` chặn thêm lệnh nguy hiểm / lạc đề theo xác suất; `approve` cảnh báo dòng Acceptance khó kiểm chứng. Chỉ cố vấn, lỗi thì cho qua.
 - `install.py --with-jev` (cài hoặc nâng cấp) đặt `JEV_ENABLED=1`; `doctor` báo trạng thái Jev. Runner đưa cấu hình Jev và `AGENT_KIT_TASK_FILE` vào môi trường agent để hook trong worktree dùng được.

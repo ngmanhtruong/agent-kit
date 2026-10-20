@@ -884,6 +884,8 @@ def cmd_doctor(args):
         say("✓", f"agent-kit {kit_version()}: file của kit khớp manifest")
     try:
         import jev
+        if jev.setting("JEV_ENABLED") != "1":
+            say("·", "Jev (TypeSafe) tắt — tuỳ chọn. Bật: python3 runner/kit.py jev on")
         if jev.setting("JEV_ENABLED") == "1":
             if not jev.api_key():
                 say("✗", "Jev bật (JEV_ENABLED=1) nhưng thiếu khoá: đặt TYPESAFE_API_KEY (biến môi trường hoặc runner/config.env)")
@@ -1292,6 +1294,59 @@ def cmd_set(args):
     set_status(t, st, args.status, **extra)
     publish(st, msg=f"set {args.id}={args.status}")
     print(f"{args.id} → {args.status}")
+
+
+def jev_status() -> None:
+    """Chỉ đọc (trừ một lần GET /v1/models khi đang bật và có khoá)."""
+    import jev
+    on = jev.setting("JEV_ENABLED") == "1"
+    print(f"Jev (TypeSafe): {'BẬT' if on else 'TẮT'}  (tuỳ chọn; chỉ cố vấn, không thay reviewer/chấm điểm)")
+    src = jev.key_source()
+    print(f"  Khoá: {'có, từ ' + src if src else 'chưa có (đặt TYPESAFE_API_KEY: biến môi trường hoặc runner/config.env)'}")
+    print(f"  Model {jev.setting('JEV_MODEL')} · chặn lệnh khi ≥ {jev.setting('JEV_BLOCK_AT')} · cảnh báo Acceptance khi < "
+          f"{jev.setting('JEV_ACCEPT_MIN')} · khi Jev lỗi: {'cho qua' if jev.setting('JEV_ON_ERROR') != 'block' else 'CHẶN'}")
+    print(f"  Hook guard_bash: {'đã nối Jev' if jev.wired(ROOT) else 'CHƯA nối Jev (cài từ bản cũ) → python3 <agent-kit>/install.py . --upgrade'}")
+    if on and src:
+        ok, msg = jev.check_key()
+        print(f"  Kết nối api.typesafe.ai: {'✓' if ok else '✗'} {msg}")
+    if on and not src:
+        print("  ✗ Đang bật nhưng thiếu khoá nên Jev không chạy.")
+    print("  Bật/tắt: python3 runner/kit.py jev on|off   (chỉ đổi runner/config.env của máy này)")
+
+
+def cmd_jev(args):
+    try:
+        import jev
+    except ImportError:
+        sys.exit("Project này chưa có runner/jev.py (cài từ bản cũ). Chạy: python3 <agent-kit>/install.py . --upgrade --with-jev")
+    action = getattr(args, "action", "status") or "status"
+    if action == "status":
+        return jev_status()
+    cfg = ROOT / "runner" / "config.env"
+    if not cfg.exists():
+        ex = ROOT / "runner" / "config.env.example"
+        if ex.exists():
+            shutil.copy2(ex, cfg)
+    if action == "off":
+        jev.set_config(cfg, "JEV_ENABLED", "0")
+        print("✓ Jev tắt (JEV_ENABLED=0 trong runner/config.env). Không còn gì gửi tới TypeSafe.")
+        return
+    if not getattr(args, "yes", False):
+        warn = ("Bật Jev nghĩa là lệnh shell của agent (tối đa 1500 ký tự/lệnh) và nội dung task/Acceptance\n"
+                "được GỬI tới dịch vụ TypeSafe (api.typesafe.ai). Với mã nguồn nhạy cảm, hãy xin phép trước.")
+        if not sys.stdin.isatty():
+            sys.exit(warn + "\nChạy lại với --yes để xác nhận.")
+        print(warn)
+        if input("Tiếp tục? [y/N] ").strip().lower() not in ("y", "yes", "c", "có"):
+            print("Đã huỷ, chưa đổi gì.")
+            return
+    jev.set_config(cfg, "JEV_ENABLED", "1")
+    print("✓ Jev bật (JEV_ENABLED=1 trong runner/config.env của máy này).\n")
+    jev_status()
+    if not jev.wired(ROOT):
+        print("\n! Jev chưa có tác dụng trong hook cho tới khi nâng cấp: python3 <agent-kit>/install.py . --upgrade")
+    if not jev.key_source():
+        print("\nCòn thiếu khoá: tạo ở https://console.typesafe.ai/keys rồi export TYPESAFE_API_KEY (hoặc điền vào runner/config.env).")
 
 
 def cmd_import(_args):
@@ -2003,6 +2058,10 @@ def menu_state() -> dict:
         why=f"{len(failed)} task failed: `set <ID> queued` để chạy lại" if failed else "",
         choices=[dict(id=f["id"], why=f["why"], command=f"set {f['id']} queued") for f in failed])
 
+    add("j", "Bật/tắt Jev (TypeSafe, tuỳ chọn)", "jev status|on|off", available=True,
+        why="bật = lệnh shell và nội dung task được gửi tới TypeSafe; `jev on` cần `--yes` khi không có terminal",
+        ask="hỏi người dùng có muốn bật không; chỉ chạy `jev on --yes` khi họ đồng ý rõ ràng")
+
     rec = "7" if not tasks else None
     for key, cond in [("1", sess or ready), ("6", drafts), ("9", c.get("review")), ("3", failed)]:
         if cond and opts[key]["available"]:
@@ -2151,6 +2210,19 @@ def menu_sync():
         menu_run(f"set {tid} queued", cmd_set, id=tid, status="queued")
 
 
+def menu_jev():
+    try:
+        import jev
+    except ImportError:
+        print("Project này chưa có runner/jev.py → python3 <agent-kit>/install.py . --upgrade --with-jev")
+        return
+    menu_run("jev status", cmd_jev, action="status", yes=False)
+    on = jev.setting("JEV_ENABLED") == "1"
+    a = menu_ask(f"\n[{'t' if on else 'b'}] {'tắt' if on else 'bật'} Jev · Enter: giữ nguyên: ").lower()
+    if a == ("t" if on else "b"):
+        menu_run(f"jev {'off' if on else 'on'}", cmd_jev, action="off" if on else "on", yes=False)
+
+
 MENU = [
     ("1", "Bắt đầu làm việc (work)", "AI", menu_work),
     ("2", "Xem tình hình mọi task", "", lambda: menu_run("status", cmd_status, offline=False)),
@@ -2161,6 +2233,7 @@ MENU = [
     ("7", "Bắt đầu tính năng mới (ý tưởng → PRD → chia task)", "AI", menu_feature),
     ("8", "Yêu cầu nào đã xong? (trace)", "", menu_trace),
     ("9", "Đồng bộ trạng thái, cho task failed chạy lại", "", menu_sync),
+    ("j", "Bật/tắt Jev (TypeSafe, tuỳ chọn)", "", menu_jev),
 ]
 
 
@@ -2222,6 +2295,10 @@ def main():
     p.add_argument("--task"); p.add_argument("--abort", action="store_true"); p.set_defaults(fn=cmd_work)
     sub.add_parser("sync").set_defaults(fn=cmd_sync)
     sub.add_parser("import").set_defaults(fn=cmd_import)
+    p = sub.add_parser("jev", help="bật/tắt/xem Jev (TypeSafe), tuỳ chọn")
+    p.add_argument("action", nargs="?", default="status", choices=["on", "off", "status"])
+    p.add_argument("--yes", action="store_true", help="(on) xác nhận không hỏi; cần khi không có terminal")
+    p.set_defaults(fn=cmd_jev)
     p = sub.add_parser("set"); p.add_argument("id"); p.add_argument("status"); p.set_defaults(fn=cmd_set)
     a = ap.parse_args()
     try:

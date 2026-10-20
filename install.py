@@ -133,6 +133,10 @@ def enable_jev(repo: Path) -> None:
     print("       Agent khác:   npx skills add typesafe-ai/skills --skill typesafe-ai")
     print("     (kit.py tự gọi API nên không cần skill để Jev chạy.)")
     print("  3. python3 runner/kit.py doctor   # kiểm tra kết nối Jev")
+    hook = repo / ".claude" / "hooks" / "guard_bash.py"
+    if not hook.exists() or "import jev" not in hook.read_text():
+        print("\n  ! Project này chưa có phần nối Jev (cài từ bản cũ, hoặc hook đã bị sửa): JEV_ENABLED=1 CHƯA có tác dụng.")
+        print(f"    Chạy: python3 {Path(__file__).resolve()} {repo} --upgrade --with-jev")
     print("  Lưu ý riêng tư: lệnh shell của agent và nội dung task/Acceptance sẽ được gửi tới api.typesafe.ai.")
 
 

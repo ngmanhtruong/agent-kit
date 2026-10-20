@@ -57,6 +57,39 @@ def api_key() -> str:
         or os.environ.get("JEV_API_KEY") or ""
 
 
+def key_source() -> str:
+    if os.environ.get("TYPESAFE_API_KEY"):
+        return "biến môi trường TYPESAFE_API_KEY"
+    if _config_file().get("TYPESAFE_API_KEY"):
+        return "runner/config.env"
+    if os.environ.get("JEV_API_KEY"):
+        return "biến môi trường JEV_API_KEY"
+    return ""
+
+
+def set_config(path: Path, key: str, value: str) -> None:
+    """Đặt key=value trong config.env (sửa dòng có sẵn, không thì thêm cuối). Không đụng dòng khác."""
+    lines = path.read_text().splitlines() if path.exists() else []
+    out, done = [], False
+    for l in lines:
+        if l.strip().startswith(key + "="):
+            out.append(f"{key}={value}")
+            done = True
+        else:
+            out.append(l)
+    if not done:
+        out += ["", f"{key}={value}"]
+    path.write_text("\n".join(out) + "\n")
+
+
+def wired(root: Path) -> bool:
+    """Hook guard_bash của project có nối Jev không (project cài từ bản cũ thì không)."""
+    try:
+        return "import jev" in (root / ".claude" / "hooks" / "guard_bash.py").read_text()
+    except OSError:
+        return False
+
+
 def enabled() -> bool:
     return setting("JEV_ENABLED") == "1" and bool(api_key())
 
